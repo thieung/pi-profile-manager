@@ -1,0 +1,610 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="pi-profile-manager"
+PI_PACKAGE="@earendil-works/pi-coding-agent"
+OMP_TOOL="github:can1357/oh-my-pi"
+DRY_RUN=0
+REQUESTED_VERSION="latest"
+
+PI_EXTENSIONS=(
+  "npm:statusline-pi@1.2.1"
+  "npm:advisor-pi@1.0.3"
+  "npm:grok-pi@1.2.0"
+  "npm:model-debugger@1.0.2"
+  "npm:@tintinweb/pi-subagents@0.18.0"
+)
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  pi-profile-manager doctor
+  pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
+  pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
+  pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
+
+The script never reads or writes provider credentials. AgentKit is invoked only
+for pi-ak and pi-omp. Use --dry-run to preview filesystem and command mutations.
+USAGE
+}
+
+info() {
+  printf 'INFO: %s\n' "$*"
+}
+
+warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+print_command() {
+  printf 'RUN:'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_command() {
+  print_command "$@"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    "$@"
+  fi
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+validate_version() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] \
+    || fail "invalid version: $1"
+}
+
+timestamp() {
+  date '+%Y%m%d-%H%M%S'
+}
+
+write_managed_file() {
+  local path="$1"
+  local content="$2"
+  local current=""
+  local backup=""
+
+  if [[ -f "$path" ]]; then
+    current="$(<"$path")"
+    if [[ "$current" == "$content" ]]; then
+      info "unchanged: $path"
+      return
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      backup="${path}.bak.$(timestamp).XXXXXX"
+      info "would back up: $path -> $backup"
+    else
+      backup="$(mktemp "${path}.bak.$(timestamp).XXXXXX")"
+      cp -p "$path" "$backup"
+      info "backed up: $path -> $backup"
+    fi
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would write: $path"
+    return
+  fi
+
+  mkdir -p "$(dirname "$path")"
+  printf '%s\n' "$content" >"$path"
+  info "wrote: $path"
+}
+
+pi_root() {
+  printf '%s/.pi/profiles/%s' "$HOME" "$1"
+}
+
+omp_root() {
+  printf '%s/.omp/profiles/pi-omp/agent' "$HOME"
+}
+
+pi_config_content() {
+  local profile="$1"
+  printf '%s\n' \
+    '[env]' \
+    "PI_CODING_AGENT_DIR = \"{{ env.HOME }}/.pi/profiles/${profile}\"" \
+    "PI_CODING_AGENT_SESSION_DIR = \"{{ env.HOME }}/.pi/profiles/${profile}/sessions\"" \
+    'OMP_PROFILE = false' \
+    'PI_PROFILE = false'
+}
+
+omp_config_content() {
+  printf '%s\n' \
+    '[env]' \
+    'OMP_PROFILE = "pi-omp"' \
+    'AGENTKIT_OMP_HOME = "{{ env.HOME }}/.omp/profiles/pi-omp/agent"' \
+    'PI_PROFILE = false' \
+    'PI_CODING_AGENT_DIR = false' \
+    'PI_CODING_AGENT_SESSION_DIR = false'
+}
+
+wrapper_content() {
+  local profile="$1"
+  local executable="$2"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    "exec mise -E ${profile} exec -- ${executable} \"\$@\""
+}
+
+ensure_pi_profile() {
+  local profile="$1"
+  local root
+  local config_path="$HOME/.config/mise/config.${profile}.toml"
+  local wrapper_path="$HOME/.local/bin/${profile}"
+  root="$(pi_root "$profile")"
+
+  run_command mkdir -p "$root/sessions" "$HOME/.config/mise" "$HOME/.local/bin"
+  write_managed_file "$config_path" "$(pi_config_content "$profile")"
+  write_managed_file "$wrapper_path" "$(wrapper_content "$profile" pi)"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    chmod 0755 "$wrapper_path"
+  else
+    info "would chmod 0755: $wrapper_path"
+  fi
+}
+
+ensure_omp_profile() {
+  local root
+  local config_path="$HOME/.config/mise/config.pi-omp.toml"
+  local wrapper_path="$HOME/.local/bin/pi-omp"
+  root="$(omp_root)"
+
+  run_command mkdir -p "$root" "$HOME/.config/mise" "$HOME/.local/bin"
+  write_managed_file "$config_path" "$(omp_config_content)"
+  write_managed_file "$wrapper_path" "$(wrapper_content pi-omp omp)"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    chmod 0755 "$wrapper_path"
+  else
+    info "would chmod 0755: $wrapper_path"
+  fi
+}
+
+assert_pi_profile_root() {
+  local profile="$1"
+  local expected
+  local actual
+  expected="$(pi_root "$profile")"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would assert $profile root: $expected"
+    return
+  fi
+
+  # Expansion is intentionally deferred to the profile-scoped child shell.
+  # shellcheck disable=SC2016
+  actual="$(mise -E "$profile" exec -- sh -c 'printf %s "$PI_CODING_AGENT_DIR"')"
+  [[ "$actual" == "$expected" ]] \
+    || fail "$profile resolved root '$actual'; expected '$expected'"
+  [[ "$actual" != "$HOME/.pi/agent" ]] \
+    || fail "$profile resolved to forbidden default root: $actual"
+  info "$profile root verified: $actual"
+}
+
+assert_omp_profile_root() {
+  local expected
+  local values
+  local actual_root
+  local pi_value
+  expected="$(omp_root)"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would assert pi-omp root: $expected"
+    return
+  fi
+
+  # Expansion is intentionally deferred to the profile-scoped child shell.
+  # shellcheck disable=SC2016
+  values="$(mise -E pi-omp exec -- sh -c 'printf "%s\n%s" "$AGENTKIT_OMP_HOME" "${PI_CODING_AGENT_DIR-unset}"')"
+  actual_root="${values%%$'\n'*}"
+  pi_value="${values#*$'\n'}"
+  [[ "$actual_root" == "$expected" ]] \
+    || fail "pi-omp resolved root '$actual_root'; expected '$expected'"
+  [[ "$pi_value" == "unset" ]] \
+    || fail "pi-omp unexpectedly inherits PI_CODING_AGENT_DIR='$pi_value'"
+  info "pi-omp root verified: $actual_root"
+}
+
+install_pi_binary() {
+  local version="$1"
+  require_command npm
+  validate_version "$version"
+  run_command npm install -g --ignore-scripts "${PI_PACKAGE}@${version}"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    require_command pi
+    info "Pi installed: $(pi --version)"
+  fi
+}
+
+resolve_omp_version() {
+  local version="$1"
+  if [[ "$DRY_RUN" -eq 1 && "$version" == "latest" ]]; then
+    printf '%s\n' "latest"
+    return
+  fi
+  if [[ "$version" == "latest" ]]; then
+    mise latest "$OMP_TOOL"
+  else
+    printf '%s\n' "$version"
+  fi
+}
+
+install_omp_binary() {
+  local version="$1"
+  local resolved
+  require_command mise
+  validate_version "$version"
+  resolved="$(resolve_omp_version "$version")"
+  validate_version "$resolved"
+  if [[ "$DRY_RUN" -eq 1 && "$version" == "latest" ]]; then
+    info "OMP target version: latest (not resolved during dry-run)"
+  else
+    info "OMP target version: $resolved"
+  fi
+  run_command env MISE_LOCKED=0 mise use -g --pin "${OMP_TOOL}@${resolved}"
+  run_command mise lock -g "$OMP_TOOL"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    require_command omp
+    info "OMP installed: $(omp --version)"
+  fi
+}
+
+install_pi_extensions() {
+  local profile="$1"
+  local extension=""
+  local wrapper="$HOME/.local/bin/$profile"
+  assert_pi_profile_root "$profile"
+  for extension in "${PI_EXTENSIONS[@]}"; do
+    run_command "$wrapper" install "$extension"
+  done
+}
+
+install_agentkit() {
+  local profile="$1"
+  local target="$2"
+  require_command ak
+  if [[ "$target" == "pi" ]]; then
+    assert_pi_profile_root "$profile"
+  else
+    assert_omp_profile_root
+  fi
+  run_command mise -E "$profile" exec -- \
+    ak kit init engineer \
+    --target "$target" \
+    --global \
+    --channel beta \
+    --yes \
+    --no-interactive
+}
+
+preflight_install() {
+  local target="$1"
+  require_command mise
+  case "$target" in
+    pi-dev)
+      require_command npm
+      ;;
+    pi-ak)
+      require_command npm
+      require_command ak
+      ;;
+    pi-omp)
+      require_command ak
+      ;;
+    all)
+      require_command npm
+      require_command ak
+      ;;
+    *)
+      fail "unknown install target: $target"
+      ;;
+  esac
+}
+
+prepare_install_target() {
+  local target="$1"
+
+  case "$target" in
+    pi-dev)
+      ensure_pi_profile pi-dev
+      assert_pi_profile_root pi-dev
+      ;;
+    pi-ak)
+      ensure_pi_profile pi-ak
+      assert_pi_profile_root pi-ak
+      ;;
+    pi-omp)
+      ensure_omp_profile
+      assert_omp_profile_root
+      ;;
+    all)
+      ensure_pi_profile pi-dev
+      ensure_pi_profile pi-ak
+      ensure_omp_profile
+      assert_pi_profile_root pi-dev
+      assert_pi_profile_root pi-ak
+      assert_omp_profile_root
+      ;;
+  esac
+}
+
+install_target() {
+  local target="$1"
+  preflight_install "$target"
+  prepare_install_target "$target"
+
+  case "$target" in
+    pi-dev)
+      install_pi_binary latest
+      install_pi_extensions pi-dev
+      ;;
+    pi-ak)
+      install_pi_binary latest
+      install_pi_extensions pi-ak
+      install_agentkit pi-ak pi
+      ;;
+    pi-omp)
+      install_omp_binary latest
+      install_agentkit pi-omp omp
+      ;;
+    all)
+      install_pi_binary latest
+      install_pi_extensions pi-dev
+      install_pi_extensions pi-ak
+      install_agentkit pi-ak pi
+      install_omp_binary latest
+      install_agentkit pi-omp omp
+      ;;
+  esac
+
+  info "install complete: $target"
+  info "next: $PROGRAM_NAME verify $target"
+}
+
+update_pi() {
+  assert_installed_pi_profiles_for_update
+  install_pi_binary "$REQUESTED_VERSION"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    [[ ! -x "$HOME/.local/bin/pi-dev" ]] || info "pi-dev: $("$HOME/.local/bin/pi-dev" --version)"
+    [[ ! -x "$HOME/.local/bin/pi-ak" ]] || info "pi-ak: $("$HOME/.local/bin/pi-ak" --version)"
+  fi
+}
+
+update_omp() {
+  assert_installed_omp_profile_for_update
+  install_omp_binary "$REQUESTED_VERSION"
+  if [[ "$DRY_RUN" -eq 0 && -x "$HOME/.local/bin/pi-omp" ]]; then
+    info "pi-omp: $("$HOME/.local/bin/pi-omp" --version)"
+  fi
+}
+
+assert_installed_pi_profiles_for_update() {
+  local profile=""
+  local config_path=""
+  local wrapper_path=""
+  local found=0
+
+  for profile in pi-dev pi-ak; do
+    config_path="$HOME/.config/mise/config.${profile}.toml"
+    wrapper_path="$HOME/.local/bin/${profile}"
+    if [[ -e "$config_path" || -e "$wrapper_path" ]]; then
+      [[ -f "$config_path" ]] || fail "$profile update requires config: $config_path"
+      [[ -x "$wrapper_path" ]] || fail "$profile update requires executable wrapper: $wrapper_path"
+      assert_pi_profile_root "$profile"
+      found=1
+    fi
+  done
+
+  [[ "$found" -eq 1 ]] \
+    || fail "no managed Pi profile found; run install pi-dev or install pi-ak first"
+}
+
+assert_installed_omp_profile_for_update() {
+  local config_path="$HOME/.config/mise/config.pi-omp.toml"
+  local wrapper_path="$HOME/.local/bin/pi-omp"
+
+  [[ -f "$config_path" ]] || fail "pi-omp update requires config: $config_path"
+  [[ -x "$wrapper_path" ]] || fail "pi-omp update requires executable wrapper: $wrapper_path"
+  assert_omp_profile_root
+}
+
+update_target() {
+  local target="$1"
+  case "$target" in
+    pi)
+      require_command mise
+      require_command npm
+      update_pi
+      ;;
+    omp)
+      require_command mise
+      update_omp
+      ;;
+    all)
+      [[ "$REQUESTED_VERSION" == "latest" ]] \
+        || fail "--version cannot be combined with update all"
+      require_command mise
+      require_command npm
+      assert_installed_pi_profiles_for_update
+      assert_installed_omp_profile_for_update
+      update_pi
+      update_omp
+      ;;
+    *)
+      fail "unknown update target: $target"
+      ;;
+  esac
+}
+
+verify_pi_profile() {
+  local profile="$1"
+  local root
+  local wrapper="$HOME/.local/bin/$profile"
+  local packages
+  local extension=""
+  root="$(pi_root "$profile")"
+
+  [[ -x "$wrapper" ]] || fail "missing executable wrapper: $wrapper"
+  assert_pi_profile_root "$profile"
+  packages="$("$wrapper" list)"
+  for extension in "${PI_EXTENSIONS[@]}"; do
+    grep -F "$extension" <<<"$packages" >/dev/null \
+      || fail "$profile missing extension: $extension"
+  done
+  grep -F "$root/npm/node_modules" <<<"$packages" >/dev/null \
+    || fail "$profile package list does not point to its profile root"
+
+  if [[ "$profile" == "pi-ak" ]]; then
+    [[ -f "$root/extensions/agentkit-hooks-engineer/.agentkit/install-manifest.json" ]] \
+      || fail "pi-ak missing AgentKit install manifest"
+  fi
+  info "$profile verification passed"
+}
+
+verify_omp_profile() {
+  local root
+  local wrapper="$HOME/.local/bin/pi-omp"
+  local runtime_root
+  root="$(omp_root)"
+
+  [[ -x "$wrapper" ]] || fail "missing executable wrapper: $wrapper"
+  assert_omp_profile_root
+  runtime_root="$("$wrapper" config path)"
+  [[ "$runtime_root" == "$root" ]] \
+    || fail "pi-omp config path '$runtime_root'; expected '$root'"
+  [[ -f "$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json" ]] \
+    || fail "pi-omp missing AgentKit ownership index"
+  info "pi-omp verification passed"
+}
+
+verify_target() {
+  local target="$1"
+  require_command mise
+  case "$target" in
+    pi-dev)
+      verify_pi_profile pi-dev
+      ;;
+    pi-ak)
+      verify_pi_profile pi-ak
+      ;;
+    pi-omp)
+      verify_omp_profile
+      ;;
+    all)
+      verify_pi_profile pi-dev
+      verify_pi_profile pi-ak
+      verify_omp_profile
+      ;;
+    *)
+      fail "unknown verify target: $target"
+      ;;
+  esac
+}
+
+doctor() {
+  local failures=0
+  local command_name=""
+  for command_name in mise npm; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      info "$command_name: $(command -v "$command_name")"
+    else
+      warn "missing prerequisite: $command_name"
+      failures=$((failures + 1))
+    fi
+  done
+
+  for command_name in pi omp ak; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      info "$command_name: $(command -v "$command_name")"
+    else
+      warn "optional until its profile is installed: $command_name"
+    fi
+  done
+
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) info "wrapper PATH configured: $HOME/.local/bin" ;;
+    *) warn "$HOME/.local/bin is not currently in PATH" ;;
+  esac
+
+  [[ "$failures" -eq 0 ]] || fail "doctor found $failures missing prerequisite(s)"
+  info "doctor passed"
+}
+
+parse_options() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --version)
+        [[ "$#" -ge 2 ]] || fail "--version requires a value"
+        REQUESTED_VERSION="$2"
+        validate_version "$REQUESTED_VERSION"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown option: $1"
+        ;;
+    esac
+  done
+}
+
+main() {
+  local command="${1:-}"
+  local target=""
+  [[ -n "$command" ]] || {
+    usage
+    exit 1
+  }
+  shift || true
+
+  case "$command" in
+    doctor)
+      [[ "$#" -eq 0 ]] || fail "doctor does not accept arguments"
+      doctor
+      ;;
+    install)
+      target="${1:-}"
+      [[ -n "$target" ]] || fail "install requires a profile or all"
+      shift
+      parse_options "$@"
+      [[ "$REQUESTED_VERSION" == "latest" ]] \
+        || fail "--version is supported only by update"
+      install_target "$target"
+      ;;
+    update)
+      target="${1:-}"
+      [[ -n "$target" ]] || fail "update requires pi, omp, or all"
+      shift
+      parse_options "$@"
+      update_target "$target"
+      ;;
+    verify)
+      target="${1:-all}"
+      [[ "$#" -le 1 ]] || fail "verify accepts at most one target"
+      verify_target "$target"
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      usage >&2
+      fail "unknown command: $command"
+      ;;
+  esac
+}
+
+main "$@"

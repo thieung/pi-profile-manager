@@ -1,0 +1,45 @@
+{
+  "name": "@thieung/pi-profile-manager",
+  "version": "1.0.0",
+  "description": "Safe profile manager for Pi, Oh My Pi, Mise, and AgentKit",
+  "type": "module",
+  "bin": {
+    "pi-profile-manager": "bin/pi-profile-manager.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "payload/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs && bash test/pi-profile-manager.test.sh && bash scripts/check-payload-sync.sh",
+    "test:node": "node --test --test-concurrency=1 test/*.test.mjs",
+    "test:payload": "bash test/pi-profile-manager.test.sh && bash scripts/check-payload-sync.sh",
+    "check": "bash -n payload/pi-profile-manager test/pi-profile-manager.test.sh scripts/check-payload-sync.sh"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "pi",
+    "oh-my-pi",
+    "mise",
+    "agentkit",
+    "coding-agent"
+  ],
+  "author": "Thieu Nguyen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thieung/pi-profile-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thieung/pi-profile-manager/issues"
+  },
+  "homepage": "https://github.com/thieung/pi-profile-manager#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}
