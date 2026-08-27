@@ -67,10 +67,13 @@ pi-profile-manager bootstrap
 pi-profile-manager doctor
 ```
 
-`bootstrap` tải official installer từ `https://mise.run` vào temporary file,
-sau đó cài `~/.local/bin/mise` và verify version. Command không pipe network
-response trực tiếp vào shell, không dùng `sudo`, không sửa shell rc và không tự
-cài Node.js/npm hoặc AgentKit. Nếu Mise đã có, command là idempotent no-op.
+`bootstrap` tải official installer từ `https://mise.run` vào temporary file.
+Installer chỉ ghi vào staging directory cùng filesystem; manager chạy
+`--version` trên binary staging rồi mới atomic rename thành
+`~/.local/bin/mise`. Nếu download, install hoặc verification lỗi, target cuối
+vẫn absent và staging được dọn. Command không pipe network response trực tiếp
+vào shell, không dùng `sudo`, không sửa shell rc và không tự cài Node.js/npm
+hoặc AgentKit. Nếu Mise đã có, command là idempotent no-op.
 
 ## Cài Profiles
 

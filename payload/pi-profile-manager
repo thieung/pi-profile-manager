@@ -73,6 +73,9 @@ timestamp() {
 bootstrap_mise() {
   local install_path="$HOME/.local/bin/mise"
   local installer=""
+  local staging_dir=""
+  local staged_mise=""
+  local mise_version=""
 
   if command -v mise >/dev/null 2>&1; then
     info "mise already available: $(command -v mise)"
@@ -88,6 +91,10 @@ bootstrap_mise() {
     return
   fi
 
+  if [[ -e "$install_path" ]]; then
+    fail "refusing to replace non-executable Mise path: $install_path"
+  fi
+
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "would download official Mise installer: $MISE_INSTALLER_URL"
     info "would install Mise: $install_path"
@@ -98,29 +105,52 @@ bootstrap_mise() {
   require_command curl
   require_command sh
   mkdir -p "$HOME/.local/bin"
-  installer="$(mktemp "${TMPDIR:-/tmp}/pi-profile-manager-mise.XXXXXX")"
+  if ! installer="$(mktemp "${TMPDIR:-/tmp}/pi-profile-manager-mise.XXXXXX")"; then
+    fail "failed to create temporary Mise installer"
+  fi
+  if ! staging_dir="$(mktemp -d "$HOME/.local/bin/.mise-stage.XXXXXX")"; then
+    rm -f "$installer"
+    fail "failed to create Mise staging directory"
+  fi
+  staged_mise="$staging_dir/mise"
 
   print_command curl --proto '=https' --tlsv1.2 --fail --silent \
     --show-error --location --output "$installer" "$MISE_INSTALLER_URL"
   if ! curl --proto '=https' --tlsv1.2 --fail --silent \
     --show-error --location --output "$installer" "$MISE_INSTALLER_URL"; then
-    rm -f "$installer"
+    rm -f "$installer" "$staged_mise"
+    rmdir "$staging_dir" 2>/dev/null || true
     fail "failed to download official Mise installer"
   fi
 
-  print_command env "MISE_INSTALL_PATH=$install_path" \
+  print_command env "MISE_INSTALL_PATH=$staged_mise" \
     MISE_INSTALL_SKIP_IF_EXISTS=1 sh "$installer"
-  if ! env "MISE_INSTALL_PATH=$install_path" \
+  if ! env "MISE_INSTALL_PATH=$staged_mise" \
     MISE_INSTALL_SKIP_IF_EXISTS=1 sh "$installer"; then
-    rm -f "$installer"
+    rm -f "$installer" "$staged_mise"
+    rmdir "$staging_dir" 2>/dev/null || true
     fail "official Mise installer failed"
   fi
   rm -f "$installer"
 
-  [[ -x "$install_path" ]] \
-    || fail "Mise installer completed without executable: $install_path"
+  if [[ ! -x "$staged_mise" ]]; then
+    rm -f "$staged_mise"
+    rmdir "$staging_dir" 2>/dev/null || true
+    fail "Mise installer completed without executable staging binary"
+  fi
+  if ! mise_version="$("$staged_mise" --version)"; then
+    rm -f "$staged_mise"
+    rmdir "$staging_dir" 2>/dev/null || true
+    fail "staged Mise binary failed verification"
+  fi
+  if ! mv "$staged_mise" "$install_path"; then
+    rm -f "$staged_mise"
+    rmdir "$staging_dir" 2>/dev/null || true
+    fail "failed to promote staged Mise binary"
+  fi
+  rmdir "$staging_dir"
   info "mise installed: $install_path"
-  info "mise version: $("$install_path" --version)"
+  info "mise version: $mise_version"
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) info "add to PATH: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;

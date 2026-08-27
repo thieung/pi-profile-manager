@@ -66,6 +66,11 @@ cat >"$output" <<'FAKE_INSTALLER'
 #!/bin/sh
 set -eu
 printf 'mise-installer|%s\n' "$MISE_INSTALL_PATH" >>"$CALL_LOG"
+if [ "${FAKE_MISE_INSTALL_PARTIAL_FAIL:-0}" = "1" ]; then
+  printf 'partial binary\n' >"$MISE_INSTALL_PATH"
+  chmod 0755 "$MISE_INSTALL_PATH"
+  exit 1
+fi
 if [ "${FAKE_MISE_INSTALL_FAIL:-0}" = "1" ]; then
   exit 1
 fi
@@ -73,6 +78,9 @@ mkdir -p "$(dirname "$MISE_INSTALL_PATH")"
 cat >"$MISE_INSTALL_PATH" <<'FAKE_INSTALLED_MISE'
 #!/bin/sh
 if [ "${1:-}" = "--version" ]; then
+  if [ "${FAKE_MISE_VERSION_FAIL:-0}" = "1" ]; then
+    exit 1
+  fi
   printf 'mise 2026.8.14\n'
 fi
 FAKE_INSTALLED_MISE
@@ -225,6 +233,22 @@ test_bootstrap_existing_mise_is_noop() {
   printf 'ok: bootstrap existing Mise is no-op\n'
 }
 
+test_bootstrap_existing_off_path_mise_is_noop() {
+  new_case bootstrap-existing-off-path
+  rm "$FAKE_BIN/mise"
+  mkdir -p "$HOME/.local/bin"
+  cat >"$HOME/.local/bin/mise" <<'FAKE_OFF_PATH_MISE'
+#!/bin/sh
+printf 'mise 2026.8.14\n'
+FAKE_OFF_PATH_MISE
+  chmod 0755 "$HOME/.local/bin/mise"
+  run_manager bootstrap
+  assert_contains "mise already installed: $HOME/.local/bin/mise" "$OUTPUT"
+  assert_not_contains 'curl|' "$CALL_LOG"
+  assert_contains 'is not currently in PATH' "$OUTPUT"
+  printf 'ok: bootstrap existing off-PATH Mise is no-op\n'
+}
+
 test_bootstrap_installs_mise() {
   new_case bootstrap-install
   rm "$FAKE_BIN/mise"
@@ -232,8 +256,10 @@ test_bootstrap_installs_mise() {
   assert_file "$HOME/.local/bin/mise"
   [[ -x "$HOME/.local/bin/mise" ]] || fail "installed Mise is not executable"
   assert_contains 'curl|--proto =https --tlsv1.2 --fail --silent --show-error --location --output' "$CALL_LOG"
-  assert_contains "mise-installer|$HOME/.local/bin/mise" "$CALL_LOG"
+  assert_contains "mise-installer|$HOME/.local/bin/.mise-stage." "$CALL_LOG"
   assert_contains 'mise version: mise 2026.8.14' "$OUTPUT"
+  [[ -z "$(find "$HOME/.local/bin" -name '.mise-stage.*' -print -quit)" ]] \
+    || fail "successful bootstrap left a staged Mise binary"
   [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
     || fail "successful bootstrap left a temporary installer"
   printf 'ok: bootstrap installs and verifies Mise\n'
@@ -267,6 +293,50 @@ test_bootstrap_installer_failure_cleans_up() {
   [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
     || fail "installer failure left a temporary installer"
   printf 'ok: bootstrap installer failure cleans up\n'
+}
+
+test_bootstrap_partial_installer_failure_cleans_up() {
+  new_case bootstrap-partial-installer-failure
+  rm "$FAKE_BIN/mise"
+  export FAKE_MISE_INSTALL_PARTIAL_FAIL=1
+  if run_manager bootstrap; then
+    fail "partially failed Mise installer unexpectedly passed"
+  fi
+  unset FAKE_MISE_INSTALL_PARTIAL_FAIL
+  assert_not_exists "$HOME/.local/bin/mise"
+  [[ -z "$(find "$HOME/.local/bin" -name '.mise-stage.*' -print -quit)" ]] \
+    || fail "partial installer failure left a staged Mise binary"
+  assert_contains 'official Mise installer failed' "$OUTPUT"
+  printf 'ok: partial installer failure leaves final target absent\n'
+}
+
+test_bootstrap_verification_failure_cleans_up() {
+  new_case bootstrap-verification-failure
+  rm "$FAKE_BIN/mise"
+  export FAKE_MISE_VERSION_FAIL=1
+  if run_manager bootstrap; then
+    fail "unverifiable staged Mise unexpectedly passed"
+  fi
+  unset FAKE_MISE_VERSION_FAIL
+  assert_not_exists "$HOME/.local/bin/mise"
+  [[ -z "$(find "$HOME/.local/bin" -name '.mise-stage.*' -print -quit)" ]] \
+    || fail "verification failure left a staged Mise binary"
+  assert_contains 'staged Mise binary failed verification' "$OUTPUT"
+  printf 'ok: verification failure leaves final target absent\n'
+}
+
+test_bootstrap_refuses_non_executable_target() {
+  new_case bootstrap-non-executable-target
+  rm "$FAKE_BIN/mise"
+  mkdir -p "$HOME/.local/bin"
+  printf 'user-owned file\n' >"$HOME/.local/bin/mise"
+  if run_manager bootstrap; then
+    fail "non-executable Mise target unexpectedly replaced"
+  fi
+  assert_contains 'refusing to replace non-executable Mise path' "$OUTPUT"
+  assert_contains 'user-owned file' "$HOME/.local/bin/mise"
+  assert_not_contains 'curl|' "$CALL_LOG"
+  printf 'ok: bootstrap refuses a non-executable target\n'
 }
 
 test_dry_run_has_no_mutation() {
@@ -435,9 +505,13 @@ test_missing_dependency() {
 
 test_bootstrap_dry_run_has_no_mutation
 test_bootstrap_existing_mise_is_noop
+test_bootstrap_existing_off_path_mise_is_noop
 test_bootstrap_installs_mise
 test_bootstrap_download_failure_cleans_up
 test_bootstrap_installer_failure_cleans_up
+test_bootstrap_partial_installer_failure_cleans_up
+test_bootstrap_verification_failure_cleans_up
+test_bootstrap_refuses_non_executable_target
 test_dry_run_has_no_mutation
 test_dry_run_all_has_no_tool_invocation
 test_pi_dev_install_and_idempotency
