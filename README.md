@@ -46,7 +46,7 @@ dùng macOS/Linux; Windows user có thể thử WSL2 ở trạng thái experimen
 ## Cài Manager
 
 ```bash
-npx --yes @thieung/pi-profile-manager@1.1.0 install
+npx --yes --package @thieung/pi-profile-manager@1.1.1 ppm-bootstrap install
 export PATH="$HOME/.local/bin:$PATH"
 pi-profile-manager bootstrap --dry-run
 pi-profile-manager bootstrap
@@ -95,7 +95,7 @@ pi-profile-manager verify all
 Update manager bằng exact version:
 
 ```bash
-npx --yes @thieung/pi-profile-manager@1.1.0 install
+npx --yes --package @thieung/pi-profile-manager@1.1.1 ppm-bootstrap install
 ```
 
 Update Pi hoặc OMP binary:
@@ -115,8 +115,8 @@ pi-profile-manager update omp --version 18.0.4
 ## Status Và Uninstall
 
 ```bash
-npx --yes @thieung/pi-profile-manager@1.1.0 status
-npx --yes @thieung/pi-profile-manager@1.1.0 uninstall
+npx --yes --package @thieung/pi-profile-manager@1.1.1 ppm-bootstrap status
+npx --yes --package @thieung/pi-profile-manager@1.1.1 ppm-bootstrap uninstall
 ```
 
 Uninstall chỉ xóa manager và receipt đúng ownership. Profiles, Mise config,

@@ -23,9 +23,9 @@ function usage() {
   process.stdout.write(`Pi Profile Manager bootstrap ${packageMetadata.version}
 
 Usage:
-  npx --yes ${packageMetadata.name}@${packageMetadata.version} install
-  npx --yes ${packageMetadata.name}@${packageMetadata.version} status
-  npx --yes ${packageMetadata.name}@${packageMetadata.version} uninstall
+  npx --yes --package ${packageMetadata.name}@${packageMetadata.version} ppm-bootstrap install
+  npx --yes --package ${packageMetadata.name}@${packageMetadata.version} ppm-bootstrap status
+  npx --yes --package ${packageMetadata.name}@${packageMetadata.version} ppm-bootstrap uninstall
 
 After install:
   pi-profile-manager doctor

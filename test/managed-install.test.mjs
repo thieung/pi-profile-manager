@@ -224,5 +224,6 @@ test("package manifest has no npm install lifecycle hooks", async () => {
   }
   assert.deepEqual(manifest.bin, {
     "pi-profile-manager": "bin/pi-profile-manager.mjs",
+    "ppm-bootstrap": "bin/pi-profile-manager.mjs",
   });
 });
