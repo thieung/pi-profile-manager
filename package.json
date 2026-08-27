@@ -1,6 +1,6 @@
 {
   "name": "@thieung/pi-profile-manager",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Safe profile manager for Pi, Oh My Pi, Mise, and AgentKit",
   "type": "module",
   "bin": {
@@ -15,10 +15,10 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/*.test.mjs && bash test/pi-profile-manager.test.sh && bash scripts/check-payload-sync.sh",
+    "test": "node scripts/run-tests.mjs",
     "test:node": "node --test --test-concurrency=1 test/*.test.mjs",
-    "test:payload": "bash test/pi-profile-manager.test.sh && bash scripts/check-payload-sync.sh",
-    "check": "bash -n payload/pi-profile-manager test/pi-profile-manager.test.sh scripts/check-payload-sync.sh"
+    "test:payload": "node scripts/test-payload.mjs",
+    "check": "node scripts/check.mjs"
   },
   "engines": {
     "node": ">=22"

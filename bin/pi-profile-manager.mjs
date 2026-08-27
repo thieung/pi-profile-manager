@@ -8,6 +8,11 @@ import {
   managerStatus,
   uninstallManager,
 } from "../lib/managed-install.mjs";
+import {
+  installWindowsManager,
+  uninstallWindowsManager,
+  windowsManagerStatus,
+} from "../lib/managed-install-windows.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(
@@ -17,7 +22,10 @@ const context = {
   packageName: packageMetadata.name,
   packageVersion: packageMetadata.version,
   payloadPath: resolve(packageRoot, "payload/pi-profile-manager"),
+  windowsPayloadPath: resolve(packageRoot, "payload/pi-profile-manager-windows.mjs"),
+  windowsLauncherPath: resolve(packageRoot, "payload/pi-profile-manager.cmd"),
 };
+const windows = process.platform === "win32";
 
 function usage() {
   process.stdout.write(`Pi Profile Manager bootstrap ${packageMetadata.version}
@@ -43,15 +51,18 @@ async function main() {
 
   switch (command) {
     case "install":
-      await installManager(context);
+      if (windows && process.arch !== "x64") {
+        throw new Error(`unsupported Windows architecture: ${process.arch}; only x64 is supported`);
+      }
+      await (windows ? installWindowsManager(context) : installManager(context));
       return;
     case "status": {
-      const result = await managerStatus(context);
+      const result = await (windows ? windowsManagerStatus(context) : managerStatus(context));
       process.exitCode = result.exitCode;
       return;
     }
     case "uninstall":
-      await uninstallManager(context);
+      await (windows ? uninstallWindowsManager(context) : uninstallManager(context));
       return;
     case "--version":
     case "-v":
