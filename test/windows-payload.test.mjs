@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { createWindowsProfileManager } from "../payload/pi-profile-manager-windows.mjs";
+import { buildCmdInvocation, createWindowsProfileManager } from "../payload/pi-profile-manager-windows.mjs";
 
 const EXTENSIONS = [
   "npm:statusline-pi@1.2.1",
@@ -12,6 +12,13 @@ const EXTENSIONS = [
   "npm:model-debugger@1.0.2",
   "npm:@tintinweb/pi-subagents@0.18.0",
 ];
+
+test("Windows cmd invocation handles spaces and percent signs", () => {
+  assert.equal(
+    buildCmdInvocation("C:\\User Home\\pi-profile-manager.cmd", ["--label", "100%"]),
+    'call "C:\\User Home\\pi-profile-manager.cmd" "--label" "100%%"',
+  );
+});
 
 function fixture(name) {
   const root = mkdtempSync(join(tmpdir(), `ppm-windows-payload-${name}-`));

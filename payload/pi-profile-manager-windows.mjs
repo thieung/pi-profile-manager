@@ -40,6 +40,10 @@ function quoteCmdArgument(value) {
   return `"${String(value).replaceAll("%", "%%").replaceAll('"', '""')}"`;
 }
 
+export function buildCmdInvocation(executable, args) {
+  return `call ${[executable, ...args].map(quoteCmdArgument).join(" ")}`;
+}
+
 function envValue(runtimeEnv, name, fallback = "") {
   const key = Object.keys(runtimeEnv).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
   return key ? runtimeEnv[key] : fallback;
@@ -83,7 +87,7 @@ function defaultRunner(runtimeEnv) {
     let finalArgs = args;
     if (process.platform === "win32" && [".cmd", ".bat"].includes(extname(executable).toLowerCase())) {
       file = envValue(runtimeEnv, "ComSpec", "cmd.exe");
-      finalArgs = ["/d", "/s", "/c", [executable, ...args].map(quoteCmdArgument).join(" ")];
+      finalArgs = ["/d", "/s", "/c", buildCmdInvocation(executable, args)];
     }
     const result = spawnSync(file, finalArgs, {
       encoding: "utf8",

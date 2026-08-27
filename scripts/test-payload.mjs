@@ -2,6 +2,7 @@ import { copyFileSync, mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "./run-command.mjs";
+import { buildCmdInvocation } from "../payload/pi-profile-manager-windows.mjs";
 
 if (process.platform === "win32") {
   const root = mkdtempSync(join(tmpdir(), "ppm windows cmd smoke "));
@@ -18,8 +19,9 @@ if (process.platform === "win32") {
   process.env.USERPROFILE = home;
   process.env.LOCALAPPDATA = localAppData;
   try {
-    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${join(bin, "pi-profile-manager.cmd")}" --help`]);
-    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${join(bin, "pi-profile-manager.cmd")}" bootstrap --dry-run`]);
+    const launcher = join(bin, "pi-profile-manager.cmd");
+    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["--help"])]);
+    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["bootstrap", "--dry-run"])]);
   } finally {
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;
