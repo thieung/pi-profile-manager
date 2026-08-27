@@ -52,8 +52,10 @@ test("first install writes executable and ownership receipt", async () => {
   await withHome(fx.home, async () => {
     await installManager(fx.context);
     assert.equal(await readFile(fx.targetPath, "utf8"), "#!/bin/sh\nprintf 'v1\\n'\n");
-    assert.equal((await lstat(fx.targetPath)).mode & 0o777, 0o755);
-    assert.equal((await lstat(fx.receiptPath)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await lstat(fx.targetPath)).mode & 0o777, 0o755);
+      assert.equal((await lstat(fx.receiptPath)).mode & 0o777, 0o600);
+    }
     const receipt = JSON.parse(await readFile(fx.receiptPath, "utf8"));
     assert.equal(receipt.package, fx.context.packageName);
     assert.equal(receipt.version, "1.0.0");
