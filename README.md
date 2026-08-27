@@ -1,81 +1,90 @@
 # Pi Profile Manager
 
-Public bootstrap package cho ba profile độc lập:
+[English](README.md) | [Tiếng Việt](README.vi.md)
+
+Set up and maintain three isolated profiles for [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi), and [AgentKit](https://github.com/bestagentkits/agentkit):
 
 ```text
-pi-dev  = Pi upstream + selected extensions
-pi-ak   = Pi upstream + selected extensions + AgentKit
+pi-dev  = upstream Pi + selected extensions
+pi-ak   = upstream Pi + selected extensions + AgentKit
 pi-omp  = Oh My Pi + AgentKit
 ```
 
-Package yêu cầu Node.js 22+ và npm. Unix payload dùng Bash; Windows native dùng
-Node.js + `.cmd`. Mise là dependency runtime; AgentKit chỉ bắt buộc khi cài
-`pi-ak` hoặc `pi-omp`.
+Each profile gets its own runtime configuration, skills, extensions, and sessions. Profile isolation does not provide a process sandbox or isolate repositories, credentials, ports, containers, or other OS-level resources.
+
+## Requirements
+
+- Node.js 22 or later
+- npm
+- Bash on macOS and Linux
+- PowerShell or Command Prompt on native Windows
+
+[Mise](https://mise.jdx.dev/) is a runtime dependency. The manager can install Mise when it is missing. AgentKit is required only for the `pi-ak` and `pi-omp` profiles.
 
 ## Supported OS
 
-| Môi trường | Trạng thái | Ghi chú |
+| Environment | Status | Notes |
 |---|---|---|
-| macOS Apple Silicon | Đã kiểm chứng | Automated tests, local tarball và registry smoke đã pass. |
-| macOS Intel | Target support | Cùng Unix/Bash contract; chưa có native smoke trên máy Intel. |
-| Linux x64/arm64 | Target support | Code path hỗ trợ Bash/Linux; chưa có Linux CI hoặc clean-machine smoke. |
-| Windows qua WSL2 | Chưa kiểm chứng | Có thể dùng Linux workflow bên trong WSL, nhưng chưa được claim support. |
-| Windows 10/11 x64 native | CI-tested | Node payload, `.cmd` wrappers và package gates đã pass trên `windows-latest`; chưa có provider-backed native smoke. |
-| Windows ARM64 native | Không hỗ trợ | Chưa có CI/runtime evidence cho full profile workflow. |
+| macOS Apple Silicon | Verified | Automated tests, a local tarball smoke test, and a registry smoke test passed. |
+| macOS Intel | Target support | Uses the same Unix/Bash contract; no native smoke test has been run on Intel hardware. |
+| Linux x64/arm64 | Target support | The Bash/Linux code path is implemented; Linux CI and clean-machine smoke tests are still pending. |
+| Windows through WSL2 | Unverified | The Linux workflow may work inside WSL2, but it is not currently claimed as supported. |
+| Native Windows 10/11 x64 | CI-tested | Node payload, `.cmd` wrappers, and package gates passed on `windows-latest`; a provider-backed native smoke test is still pending. |
+| Native Windows ARM64 | Unsupported | There is not enough CI or runtime evidence for the complete profile workflow. |
 
-`Target support` nghĩa là implementation được thiết kế cho platform đó nhưng
-chưa đạt cùng evidence level với macOS Apple Silicon. Không nên hiểu là đã được
-test đầy đủ trên mọi distribution hoặc architecture.
+`Target support` means the implementation was designed for that platform, not that it has been fully tested across every distribution or architecture.
 
-### Windows native support contract
+### Native Windows contract
 
-Windows implementation dùng adapter riêng:
+The Windows implementation uses a dedicated adapter:
 
-- Manager launcher/runtime: `%USERPROFILE%\bin\pi-profile-manager.{cmd,mjs}`.
-- Receipt, lock và backups: `%LOCALAPPDATA%\pi-profile-manager`.
-- Pi profiles: `%USERPROFILE%\.pi\profiles\{pi-dev,pi-ak}`.
-- OMP profile: `%USERPROFILE%\.omp\profiles\pi-omp\agent`.
-- Mise configs: `%USERPROFILE%\.config\mise\config.<profile>.toml`.
-- Mise bootstrap: exact WinGet package `jdx.mise`; không chạy `mise.run`.
-- Foreign/drifted manager artifacts fail-closed; symlink/junction trong managed paths bị từ chối.
-- Profile config và wrapper chỉ được update khi có managed marker; file user-owned bị từ chối.
+- Manager launcher/runtime: `%USERPROFILE%\bin\pi-profile-manager.{cmd,mjs}`
+- Receipt, lock, and backups: `%LOCALAPPDATA%\pi-profile-manager`
+- Pi profiles: `%USERPROFILE%\.pi\profiles\{pi-dev,pi-ak}`
+- OMP profile: `%USERPROFILE%\.omp\profiles\pi-omp\agent`
+- Mise configs: `%USERPROFILE%\.config\mise\config.<profile>.toml`
+- Mise bootstrap: exact WinGet package `jdx.mise`; it never runs `mise.run`
+- Foreign or drifted manager artifacts fail closed; symlinks and junctions inside managed paths are rejected
+- Profile configs and wrappers are updated only when they contain the managed marker; user-owned files are rejected
 
-Pi, OMP và AgentKit đều có Windows implementation upstream, nhưng AgentKit vẫn
-xếp Pi/OMP adapters ở mức `spike`. Windows hiện đạt mức `CI-tested`; chỉ được
-claim end-to-end sau native runtime smoke với Pi/OMP/AgentKit thật.
+Pi, OMP, and AgentKit all provide Windows implementations upstream, but AgentKit still classifies its Pi/OMP adapters as spikes. Windows support is therefore `CI-tested`, not verified end to end with real Pi, OMP, AgentKit, and provider authentication.
 
-## Cài Manager
+## Install the manager
 
-### macOS/Linux
+### macOS and Linux
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
 export PATH="$HOME/.local/bin:$PATH"
 pi-profile-manager bootstrap --dry-run
 pi-profile-manager bootstrap
 pi-profile-manager doctor
 ```
 
-Package không có `postinstall`. Chỉ explicit command `install` mới ghi
-`~/.local/bin/pi-profile-manager` và ownership receipt tại
-`~/.local/share/pi-profile-manager/receipt.json`.
-
 ### Windows PowerShell
 
 ```powershell
-npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
 $env:Path = "$HOME\bin;$env:Path"
 pi-profile-manager bootstrap --dry-run
 pi-profile-manager bootstrap
 pi-profile-manager doctor
 ```
 
-Mở terminal mới sau khi thêm `%USERPROFILE%\bin` vào user `PATH`. Package không
-tự sửa PowerShell profile hoặc machine/user `PATH`.
+Open a new terminal after adding `%USERPROFILE%\bin` to your user `PATH`. The package does not modify your PowerShell profile or machine/user `PATH`.
+
+The npm package has no `postinstall` script. Only the explicit `install` command writes the manager executable and its ownership receipt:
+
+- macOS/Linux executable: `~/.local/bin/pi-profile-manager`
+- macOS/Linux receipt: `~/.local/share/pi-profile-manager/receipt.json`
+- Windows executable: `%USERPROFILE%\bin\pi-profile-manager.{cmd,mjs}`
+- Windows receipt: `%LOCALAPPDATA%\pi-profile-manager\receipt.json`
+
+Using `@latest` resolves the version currently assigned to npm's `latest` dist-tag. Pin a concrete version when you need reproducible installation or rollback.
 
 ## Bootstrap Mise
 
-Nếu `doctor` báo thiếu Mise:
+If `doctor` reports that Mise is missing:
 
 ```bash
 pi-profile-manager bootstrap --dry-run
@@ -83,17 +92,13 @@ pi-profile-manager bootstrap
 pi-profile-manager doctor
 ```
 
-Trên macOS/Linux, `bootstrap` tải official installer từ `https://mise.run` vào temporary file.
-Installer chỉ ghi vào staging directory cùng filesystem; manager chạy
-`--version` trên binary staging rồi mới atomic rename thành
-`~/.local/bin/mise`. Nếu download, install hoặc verification lỗi, target cuối
-vẫn absent và staging được dọn. Command không pipe network response trực tiếp
-vào shell, không dùng `sudo`, không sửa shell rc và không tự cài Node.js/npm
-hoặc AgentKit. Trên Windows, `bootstrap` gọi exact package
-`winget install --id jdx.mise --exact`, rồi verify `mise --version`. Nếu Mise
-đã có, command là idempotent no-op trên mọi platform.
+On macOS/Linux, `bootstrap` downloads the official installer from `https://mise.run` to a temporary file. It installs into a staging directory on the same filesystem, verifies the staged binary with `--version`, and then atomically renames it to `~/.local/bin/mise`. A failed download, installation, or verification leaves the final target absent and removes staging files.
 
-## Cài Profiles
+The command does not pipe a network response directly into a shell, use `sudo`, edit shell startup files, or install Node.js, npm, or AgentKit. On Windows, it runs the exact package command `winget install --id jdx.mise --exact` and verifies `mise --version`. If Mise is already available, `bootstrap` is an idempotent no-op.
+
+## Install profiles
+
+Preview each mutation before applying it:
 
 ```bash
 pi-profile-manager install pi-dev --dry-run
@@ -110,47 +115,52 @@ pi-profile-manager verify all
 
 ## Update
 
-Update manager bằng exact version:
+Update the manager to the npm `latest` dist-tag:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
 ```
 
-Update Pi hoặc OMP binary:
+Update the Pi or OMP runtime:
 
 ```bash
 pi-profile-manager update pi
 pi-profile-manager update omp
+# or update both
+pi-profile-manager update all
 ```
 
-Pin version cụ thể:
+Pin a runtime version:
 
 ```bash
 pi-profile-manager update pi --version 0.84.3
 pi-profile-manager update omp --version 18.0.4
 ```
 
-## Status Và Uninstall
+Pin a manager version for reproduction or rollback:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap status
-npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap uninstall
+npx --yes --package @thieung/pi-profile-manager@1.2.2 ppm-bootstrap install
 ```
 
-Uninstall chỉ xóa manager và receipt đúng ownership. Profiles, Mise config,
-wrappers, credentials và backups được giữ nguyên.
+## Status and uninstall
 
-## Safety Contract
+```bash
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap status
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap uninstall
+```
 
-- Không đọc hoặc copy provider credentials.
-- Không tự chạy qua npm lifecycle scripts.
-- Không overwrite executable không có receipt hợp lệ.
-- Không overwrite executable đã drift khỏi checksum trong receipt.
-- Upgrade tạo backup và rollback nếu replacement thất bại.
-- `--dry-run` của payload không chạy installer hoặc network mutation.
-- V1 giả định user đang chạy tool là actor duy nhất sửa managed paths trong lúc
-  command thực thi; tool không chống directory-swap đồng thời từ process khác
-  có cùng quyền user.
+Uninstall removes only manager artifacts whose ownership can be verified. Profiles, Mise configuration, wrappers, credentials, and backups remain untouched.
+
+## Safety contract
+
+- Never reads or copies provider credentials.
+- Never mutates the system through npm lifecycle scripts.
+- Never overwrites an executable without a valid ownership receipt.
+- Never overwrites an executable whose checksum has drifted from its receipt.
+- Creates a backup before an upgrade and rolls back if replacement fails.
+- Payload `--dry-run` never runs an installer or performs a network mutation.
+- Version 1 assumes that the current user is the only actor modifying managed paths during command execution; it does not protect against a concurrent directory-swap attack from another process running as the same user.
 
 ## Development
 
@@ -159,4 +169,4 @@ npm test
 npm pack --dry-run
 ```
 
-Source được phát hành theo giấy phép MIT.
+Released under the [MIT License](LICENSE).
