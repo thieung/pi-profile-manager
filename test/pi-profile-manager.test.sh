@@ -46,6 +46,40 @@ if [[ "${1:-}" == "view" ]]; then
 fi
 FAKE_NPM
 
+  cat >"$fake_bin/curl" <<'FAKE_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl|%s\n' "$*" >>"$CALL_LOG"
+output=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "--output" ]]; then
+    output="$2"
+    break
+  fi
+  shift
+done
+[[ -n "$output" ]]
+if [[ "${FAKE_CURL_FAIL:-0}" == "1" ]]; then
+  exit 22
+fi
+cat >"$output" <<'FAKE_INSTALLER'
+#!/bin/sh
+set -eu
+printf 'mise-installer|%s\n' "$MISE_INSTALL_PATH" >>"$CALL_LOG"
+if [ "${FAKE_MISE_INSTALL_FAIL:-0}" = "1" ]; then
+  exit 1
+fi
+mkdir -p "$(dirname "$MISE_INSTALL_PATH")"
+cat >"$MISE_INSTALL_PATH" <<'FAKE_INSTALLED_MISE'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf 'mise 2026.8.14\n'
+fi
+FAKE_INSTALLED_MISE
+chmod 0755 "$MISE_INSTALL_PATH"
+FAKE_INSTALLER
+FAKE_CURL
+
   cat >"$fake_bin/pi" <<'FAKE_PI'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -107,6 +141,10 @@ FAKE_AK
 set -euo pipefail
 printf 'mise|%s\n' "$*" >>"$CALL_LOG"
 case "${1:-}" in
+  --version)
+    printf 'mise 2026.8.14\n'
+    exit 0
+    ;;
   latest)
     printf '18.0.4\n'
     exit 0
@@ -142,7 +180,7 @@ case "${1:-}" in
 esac
 FAKE_MISE
 
-  chmod 0755 "$fake_bin/npm" "$fake_bin/pi" "$fake_bin/omp" \
+  chmod 0755 "$fake_bin/npm" "$fake_bin/curl" "$fake_bin/pi" "$fake_bin/omp" \
     "$fake_bin/ak" "$fake_bin/mise"
 }
 
@@ -153,8 +191,9 @@ new_case() {
   FAKE_BIN="$CASE_ROOT/bin"
   CALL_LOG="$CASE_ROOT/calls.log"
   OUTPUT="$CASE_ROOT/output.log"
-  export HOME CALL_LOG
-  mkdir -p "$HOME" "$FAKE_BIN"
+  TMPDIR="$CASE_ROOT/tmp"
+  export HOME CALL_LOG TMPDIR
+  mkdir -p "$HOME" "$FAKE_BIN" "$TMPDIR"
   : >"$CALL_LOG"
   make_fake_tools "$FAKE_BIN"
   PATH="$FAKE_BIN:/usr/bin:/bin"
@@ -163,6 +202,71 @@ new_case() {
 
 run_manager() {
   /bin/bash "$SCRIPT" "$@" >"$OUTPUT" 2>&1
+}
+
+test_bootstrap_dry_run_has_no_mutation() {
+  new_case bootstrap-dry-run
+  rm "$FAKE_BIN/mise"
+  run_manager bootstrap --dry-run
+  assert_not_exists "$HOME/.local/bin/mise"
+  [[ ! -s "$CALL_LOG" ]] || fail "bootstrap dry-run invoked a fake dependency"
+  [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
+    || fail "bootstrap dry-run created a temporary file"
+  assert_contains 'would download official Mise installer: https://mise.run' "$OUTPUT"
+  printf 'ok: bootstrap dry-run has no mutation\n'
+}
+
+test_bootstrap_existing_mise_is_noop() {
+  new_case bootstrap-existing
+  run_manager bootstrap
+  assert_contains 'mise already available:' "$OUTPUT"
+  assert_contains 'mise|--version' "$CALL_LOG"
+  assert_not_contains 'curl|' "$CALL_LOG"
+  printf 'ok: bootstrap existing Mise is no-op\n'
+}
+
+test_bootstrap_installs_mise() {
+  new_case bootstrap-install
+  rm "$FAKE_BIN/mise"
+  run_manager bootstrap
+  assert_file "$HOME/.local/bin/mise"
+  [[ -x "$HOME/.local/bin/mise" ]] || fail "installed Mise is not executable"
+  assert_contains 'curl|--proto =https --tlsv1.2 --fail --silent --show-error --location --output' "$CALL_LOG"
+  assert_contains "mise-installer|$HOME/.local/bin/mise" "$CALL_LOG"
+  assert_contains 'mise version: mise 2026.8.14' "$OUTPUT"
+  [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
+    || fail "successful bootstrap left a temporary installer"
+  printf 'ok: bootstrap installs and verifies Mise\n'
+}
+
+test_bootstrap_download_failure_cleans_up() {
+  new_case bootstrap-download-failure
+  rm "$FAKE_BIN/mise"
+  export FAKE_CURL_FAIL=1
+  if run_manager bootstrap; then
+    fail "failed Mise download unexpectedly passed"
+  fi
+  unset FAKE_CURL_FAIL
+  assert_not_exists "$HOME/.local/bin/mise"
+  assert_contains 'failed to download official Mise installer' "$OUTPUT"
+  [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
+    || fail "download failure left a temporary installer"
+  printf 'ok: bootstrap download failure cleans up\n'
+}
+
+test_bootstrap_installer_failure_cleans_up() {
+  new_case bootstrap-installer-failure
+  rm "$FAKE_BIN/mise"
+  export FAKE_MISE_INSTALL_FAIL=1
+  if run_manager bootstrap; then
+    fail "failed Mise installer unexpectedly passed"
+  fi
+  unset FAKE_MISE_INSTALL_FAIL
+  assert_not_exists "$HOME/.local/bin/mise"
+  assert_contains 'official Mise installer failed' "$OUTPUT"
+  [[ -z "$(find "$TMPDIR" -type f -print -quit)" ]] \
+    || fail "installer failure left a temporary installer"
+  printf 'ok: bootstrap installer failure cleans up\n'
 }
 
 test_dry_run_has_no_mutation() {
@@ -329,6 +433,11 @@ test_missing_dependency() {
   printf 'ok: missing dependency fails clearly\n'
 }
 
+test_bootstrap_dry_run_has_no_mutation
+test_bootstrap_existing_mise_is_noop
+test_bootstrap_installs_mise
+test_bootstrap_download_failure_cleans_up
+test_bootstrap_installer_failure_cleans_up
 test_dry_run_has_no_mutation
 test_dry_run_all_has_no_tool_invocation
 test_pi_dev_install_and_idempotency

@@ -1,6 +1,6 @@
 {
   "name": "@thieung/pi-profile-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Safe profile manager for Pi, Oh My Pi, Mise, and AgentKit",
   "type": "module",
   "bin": {

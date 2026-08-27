@@ -4,6 +4,7 @@ set -euo pipefail
 PROGRAM_NAME="pi-profile-manager"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
 OMP_TOOL="github:can1357/oh-my-pi"
+MISE_INSTALLER_URL="https://mise.run"
 DRY_RUN=0
 REQUESTED_VERSION="latest"
 
@@ -18,13 +19,15 @@ PI_EXTENSIONS=(
 usage() {
   cat <<'USAGE'
 Usage:
+  pi-profile-manager bootstrap [--dry-run]
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
   pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
   pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
 
 The script never reads or writes provider credentials. AgentKit is invoked only
-for pi-ak and pi-omp. Use --dry-run to preview filesystem and command mutations.
+for pi-ak and pi-omp. Bootstrap installs only Mise; Node.js/npm and AgentKit stay
+explicit prerequisites. Use --dry-run to preview filesystem and command mutations.
 USAGE
 }
 
@@ -65,6 +68,63 @@ validate_version() {
 
 timestamp() {
   date '+%Y%m%d-%H%M%S'
+}
+
+bootstrap_mise() {
+  local install_path="$HOME/.local/bin/mise"
+  local installer=""
+
+  if command -v mise >/dev/null 2>&1; then
+    info "mise already available: $(command -v mise)"
+    info "mise version: $(mise --version)"
+    return
+  fi
+
+  if [[ -x "$install_path" ]]; then
+    info "mise already installed: $install_path"
+    info "mise version: $("$install_path" --version)"
+    warn "$HOME/.local/bin is not currently in PATH"
+    info "add to PATH: export PATH=\"$HOME/.local/bin:\$PATH\""
+    return
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would download official Mise installer: $MISE_INSTALLER_URL"
+    info "would install Mise: $install_path"
+    info "would verify: $install_path --version"
+    return
+  fi
+
+  require_command curl
+  require_command sh
+  mkdir -p "$HOME/.local/bin"
+  installer="$(mktemp "${TMPDIR:-/tmp}/pi-profile-manager-mise.XXXXXX")"
+
+  print_command curl --proto '=https' --tlsv1.2 --fail --silent \
+    --show-error --location --output "$installer" "$MISE_INSTALLER_URL"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent \
+    --show-error --location --output "$installer" "$MISE_INSTALLER_URL"; then
+    rm -f "$installer"
+    fail "failed to download official Mise installer"
+  fi
+
+  print_command env "MISE_INSTALL_PATH=$install_path" \
+    MISE_INSTALL_SKIP_IF_EXISTS=1 sh "$installer"
+  if ! env "MISE_INSTALL_PATH=$install_path" \
+    MISE_INSTALL_SKIP_IF_EXISTS=1 sh "$installer"; then
+    rm -f "$installer"
+    fail "official Mise installer failed"
+  fi
+  rm -f "$installer"
+
+  [[ -x "$install_path" ]] \
+    || fail "Mise installer completed without executable: $install_path"
+  info "mise installed: $install_path"
+  info "mise version: $("$install_path" --version)"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) info "add to PATH: export PATH=\"$HOME/.local/bin:\$PATH\"" ;;
+  esac
 }
 
 write_managed_file() {
@@ -572,6 +632,12 @@ main() {
   shift || true
 
   case "$command" in
+    bootstrap)
+      parse_options "$@"
+      [[ "$REQUESTED_VERSION" == "latest" ]] \
+        || fail "bootstrap does not accept --version"
+      bootstrap_mise
+      ;;
     doctor)
       [[ "$#" -eq 0 ]] || fail "doctor does not accept arguments"
       doctor
