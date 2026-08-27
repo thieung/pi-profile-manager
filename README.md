@@ -20,7 +20,7 @@ Node.js + `.cmd`. Mise là dependency runtime; AgentKit chỉ bắt buộc khi c
 | macOS Intel | Target support | Cùng Unix/Bash contract; chưa có native smoke trên máy Intel. |
 | Linux x64/arm64 | Target support | Code path hỗ trợ Bash/Linux; chưa có Linux CI hoặc clean-machine smoke. |
 | Windows qua WSL2 | Chưa kiểm chứng | Có thể dùng Linux workflow bên trong WSL, nhưng chưa được claim support. |
-| Windows 10/11 x64 native | Implementation candidate | Node payload, `.cmd` wrappers và CI matrix đã được thêm; chưa có public `1.2.0` hoặc provider-backed native smoke. |
+| Windows 10/11 x64 native | CI-tested | Node payload, `.cmd` wrappers và package gates đã pass trên `windows-latest`; chưa có provider-backed native smoke. |
 | Windows ARM64 native | Không hỗ trợ | Chưa có CI/runtime evidence cho full profile workflow. |
 
 `Target support` nghĩa là implementation được thiết kế cho platform đó nhưng
@@ -41,19 +41,15 @@ Windows implementation dùng adapter riêng:
 - Profile config và wrapper chỉ được update khi có managed marker; file user-owned bị từ chối.
 
 Pi, OMP và AgentKit đều có Windows implementation upstream, nhưng AgentKit vẫn
-xếp Pi/OMP adapters ở mức `spike`. Vì vậy Windows chỉ được nâng từ
-`Implementation candidate` lên `CI-tested` sau khi `windows-latest` pass, và
-chỉ được claim end-to-end sau native runtime smoke với Pi/OMP/AgentKit thật.
+xếp Pi/OMP adapters ở mức `spike`. Windows hiện đạt mức `CI-tested`; chỉ được
+claim end-to-end sau native runtime smoke với Pi/OMP/AgentKit thật.
 
 ## Cài Manager
-
-> `1.2.0` hiện là implementation candidate trong source tree, chưa được publish
-> lên npm. Các command dưới đây chỉ dùng sau khi release gate hoàn tất.
 
 ### macOS/Linux
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.0 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
 export PATH="$HOME/.local/bin:$PATH"
 pi-profile-manager bootstrap --dry-run
 pi-profile-manager bootstrap
@@ -67,7 +63,7 @@ Package không có `postinstall`. Chỉ explicit command `install` mới ghi
 ### Windows PowerShell
 
 ```powershell
-npx --yes --package @thieung/pi-profile-manager@1.2.0 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
 $env:Path = "$HOME\bin;$env:Path"
 pi-profile-manager bootstrap --dry-run
 pi-profile-manager bootstrap
@@ -117,7 +113,7 @@ pi-profile-manager verify all
 Update manager bằng exact version:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.0 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap install
 ```
 
 Update Pi hoặc OMP binary:
@@ -137,8 +133,8 @@ pi-profile-manager update omp --version 18.0.4
 ## Status Và Uninstall
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.0 ppm-bootstrap status
-npx --yes --package @thieung/pi-profile-manager@1.2.0 ppm-bootstrap uninstall
+npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap status
+npx --yes --package @thieung/pi-profile-manager@1.2.1 ppm-bootstrap uninstall
 ```
 
 Uninstall chỉ xóa manager và receipt đúng ownership. Profiles, Mise config,
