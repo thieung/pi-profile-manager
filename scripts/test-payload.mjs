@@ -20,8 +20,9 @@ if (process.platform === "win32") {
   process.env.LOCALAPPDATA = localAppData;
   try {
     const launcher = join(bin, "pi-profile-manager.cmd");
-    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["--help"])]);
-    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["bootstrap", "--dry-run"])]);
+    const options = { windowsVerbatimArguments: true };
+    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["--help"])], options);
+    runCommand(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", buildCmdInvocation(launcher, ["bootstrap", "--dry-run"])], options);
   } finally {
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;

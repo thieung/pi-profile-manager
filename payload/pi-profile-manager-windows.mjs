@@ -85,14 +85,17 @@ function defaultRunner(runtimeEnv) {
     if (!executable) throw new Error(`missing required command: ${command}`);
     let file = executable;
     let finalArgs = args;
+    let windowsVerbatimArguments = false;
     if (process.platform === "win32" && [".cmd", ".bat"].includes(extname(executable).toLowerCase())) {
       file = envValue(runtimeEnv, "ComSpec", "cmd.exe");
       finalArgs = ["/d", "/s", "/c", buildCmdInvocation(executable, args)];
+      windowsVerbatimArguments = true;
     }
     const result = spawnSync(file, finalArgs, {
       encoding: "utf8",
       env: options.env ?? runtimeEnv,
       stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
+      windowsVerbatimArguments,
       windowsHide: true,
     });
     if (result.error) throw result.error;
