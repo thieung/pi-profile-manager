@@ -2,7 +2,7 @@
 
 [English](README.md) | [Tiếng Việt](README.vi.md)
 
-Set up and maintain three isolated profiles for [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi), and [AgentKit](https://github.com/bestagentkits/agentkit):
+Set up and maintain three isolated profiles for [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi), and [AgentKit](https://agentkit.best/?ref=OMG49S8R):
 
 ```text
 pi-dev  = upstream Pi + selected extensions

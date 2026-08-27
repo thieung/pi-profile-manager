@@ -2,7 +2,7 @@
 
 [English](README.md) | [Tiếng Việt](README.vi.md)
 
-Package bootstrap công khai cho ba profile độc lập của [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi) và [AgentKit](https://github.com/bestagentkits/agentkit):
+Package bootstrap công khai cho ba profile độc lập của [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi) và [AgentKit](https://agentkit.best/?ref=OMG49S8R):
 
 ```text
 pi-dev  = Pi upstream + selected extensions
