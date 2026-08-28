@@ -442,6 +442,34 @@ test_profiles_inventory_pi_omp_agentkit() {
   printf 'ok: profile inventory reports pi-omp AgentKit evidence\n'
 }
 
+test_profiles_inventory_accepts_one_legacy_extra_newline() {
+  new_case profiles-legacy-newline
+  run_manager install all
+  printf '\n' >>"$HOME/.config/mise/config.pi-dev.toml"
+  printf '\n' >>"$HOME/.local/bin/pi-dev"
+  printf '\n' >>"$HOME/.config/mise/config.pi-ak.toml"
+  printf '\n' >>"$HOME/.local/bin/pi-ak"
+  printf '\n' >>"$HOME/.config/mise/config.pi-omp.toml"
+  printf '\n' >>"$HOME/.local/bin/pi-omp"
+  run_manager_split profiles list --json
+  assert_json_eq '3' 'data.profiles.length'
+  assert_json_eq 'true' 'data.profiles.every((profile) => profile.managed)'
+  assert_json_eq 'true' 'data.profiles.every((profile) => profile.healthy)'
+  [[ ! -s "$ERROR_OUTPUT" ]] || fail "legacy newline compatibility wrote diagnostics"
+  printf 'ok: profile inventory accepts exactly one legacy extra newline\n'
+}
+
+test_profiles_inventory_rejects_two_extra_newlines() {
+  new_case profiles-extra-newlines
+  run_manager install pi-dev
+  printf '\n\n' >>"$HOME/.local/bin/pi-dev"
+  run_manager_split profiles list --json
+  assert_json_eq 'false' 'data.profiles[0].managed'
+  assert_json_eq 'false' 'data.profiles[0].healthy'
+  assert_contains 'managed evidence is incomplete or drifted' "$ERROR_OUTPUT"
+  printf 'ok: profile inventory rejects more than one extra newline\n'
+}
+
 test_profiles_inventory_drift_is_unhealthy() {
   new_case profiles-drift
   run_manager install pi-dev
@@ -632,6 +660,8 @@ test_profiles_inventory_empty
 test_profiles_inventory_pi_dev
 test_profiles_inventory_pi_ak_agentkit
 test_profiles_inventory_pi_omp_agentkit
+test_profiles_inventory_accepts_one_legacy_extra_newline
+test_profiles_inventory_rejects_two_extra_newlines
 test_profiles_inventory_drift_is_unhealthy
 test_profiles_inventory_foreign_is_unhealthy
 test_pi_dev_install_and_idempotency

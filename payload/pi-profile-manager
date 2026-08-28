@@ -388,6 +388,10 @@ function wrapperContent(profile, executable) {
   ].join("\n");
 }
 
+function matchesManagedContent(actual, canonical) {
+  return actual === canonical || actual === `${canonical}\n`;
+}
+
 function capture(profile, args, label) {
   const result = spawnSync(args[0], args.slice(1), {
     encoding: "utf8",
@@ -473,8 +477,8 @@ function piProfile(profile) {
   const wrapper = readRegular(wrapperPath);
   if (!config.exists && !wrapper.exists) return null;
   const managed = config.regular && wrapper.regular &&
-    config.content === piConfigContent(profile) &&
-    wrapper.content === wrapperContent(profile, "pi");
+    matchesManagedContent(config.content, piConfigContent(profile)) &&
+    matchesManagedContent(wrapper.content, wrapperContent(profile, "pi"));
   if (!managed) warn(`${profile} managed evidence is incomplete or drifted`);
   const runtimeHealthy = managed && piRuntimeHealthy(profile, agentDir, sessionDir);
   const healthy = managed && isDirectory(agentDir) && isDirectory(sessionDir) &&
@@ -498,8 +502,8 @@ function ompProfile() {
   const wrapper = readRegular(wrapperPath);
   if (!config.exists && !wrapper.exists) return null;
   const managed = config.regular && wrapper.regular &&
-    config.content === ompConfigContent() &&
-    wrapper.content === wrapperContent("pi-omp", "omp");
+    matchesManagedContent(config.content, ompConfigContent()) &&
+    matchesManagedContent(wrapper.content, wrapperContent("pi-omp", "omp"));
   if (!managed) warn("pi-omp managed evidence is incomplete or drifted");
   const runtimeHealthy = managed && ompRuntimeHealthy(agentDir);
   return {

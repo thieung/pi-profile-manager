@@ -384,6 +384,11 @@ export function createWindowsProfileManager(options = {}) {
     return `@echo off\r\n@rem ${MANAGED_MARKER}\r\nmise -E ${profile} exec -- ${executable} %*\r\nexit /b %ERRORLEVEL%\r\n`;
   }
 
+  function matchesManagedContent(actual, canonical) {
+    const newline = canonical.endsWith("\r\n") ? "\r\n" : "\n";
+    return actual === canonical || actual === `${canonical}${newline}`;
+  }
+
   function ensurePiProfile(profile) {
     const configPath = join(miseConfigDir, `config.${profile}.toml`);
     const wrapperPath = join(binDir, `${profile}.cmd`);
@@ -595,7 +600,8 @@ export function createWindowsProfileManager(options = {}) {
     const managed = config.regular && wrapperFile.regular &&
       hasManagedMarker(config.content) && hasManagedMarker(wrapperFile.content);
     if (!managed) warnProfile(profile, "managed evidence is incomplete or foreign");
-    const contentMatches = config.content === piConfig(profile) && wrapperFile.content === wrapper(profile, "pi");
+    const contentMatches = matchesManagedContent(config.content, piConfig(profile)) &&
+      matchesManagedContent(wrapperFile.content, wrapper(profile, "pi"));
     if (managed && !contentMatches) warnProfile(profile, "managed artifacts are drifted");
     const healthy = managed && contentMatches && isDirectory(agentDir) && isDirectory(sessionDir) && piRuntimeHealthy(profile);
     return {
@@ -616,7 +622,8 @@ export function createWindowsProfileManager(options = {}) {
     const managed = config.regular && wrapperFile.regular &&
       hasManagedMarker(config.content) && hasManagedMarker(wrapperFile.content);
     if (!managed) warnProfile("pi-omp", "managed evidence is incomplete or foreign");
-    const contentMatches = config.content === ompConfig() && wrapperFile.content === wrapper("pi-omp", "omp");
+    const contentMatches = matchesManagedContent(config.content, ompConfig()) &&
+      matchesManagedContent(wrapperFile.content, wrapper("pi-omp", "omp"));
     if (managed && !contentMatches) warnProfile("pi-omp", "managed artifacts are drifted");
     return {
       id: "pi-omp",

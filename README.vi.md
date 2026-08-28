@@ -150,7 +150,7 @@ pi-profile-manager update omp --version 18.0.4
 Pin manager version để reproduce hoặc rollback:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.3 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.4 ppm-bootstrap install
 ```
 
 ## Status Và Uninstall

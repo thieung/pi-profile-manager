@@ -175,6 +175,39 @@ test("Windows profile inventory detects AgentKit for pi-omp", () => {
   assert.equal(inventory.profiles[0].healthy, true);
 });
 
+test("Windows profile inventory accepts exactly one legacy extra newline", () => {
+  const fx = fixture("inventory-legacy-newline");
+  fx.manager.main(["install", "all"]);
+  const artifacts = [
+    join(fx.home, ".config", "mise", "config.pi-dev.toml"),
+    join(fx.home, "bin", "pi-dev.cmd"),
+    join(fx.home, ".config", "mise", "config.pi-ak.toml"),
+    join(fx.home, "bin", "pi-ak.cmd"),
+    join(fx.home, ".config", "mise", "config.pi-omp.toml"),
+    join(fx.home, "bin", "pi-omp.cmd"),
+  ];
+  for (const artifact of artifacts) {
+    const content = readFileSync(artifact, "utf8");
+    writeFileSync(artifact, `${content}${content.endsWith("\r\n") ? "\r\n" : "\n"}`);
+  }
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles.length, 3);
+  assert.equal(inventory.profiles.every((profile) => profile.managed), true);
+  assert.equal(inventory.profiles.every((profile) => profile.healthy), true);
+  assert.equal(fx.stderr.join(""), "");
+});
+
+test("Windows profile inventory rejects more than one extra newline", () => {
+  const fx = fixture("inventory-extra-newlines");
+  fx.manager.main(["install", "pi-dev"]);
+  const wrapper = join(fx.home, "bin", "pi-dev.cmd");
+  writeFileSync(wrapper, `${readFileSync(wrapper, "utf8")}\r\n\r\n`);
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles[0].managed, true);
+  assert.equal(inventory.profiles[0].healthy, false);
+  assert.match(fx.stderr.join(""), /pi-dev managed artifacts are drifted/);
+});
+
 test("Windows profile inventory keeps managed drift visible but unhealthy", () => {
   const fx = fixture("inventory-drift");
   fx.manager.main(["install", "pi-dev"]);
