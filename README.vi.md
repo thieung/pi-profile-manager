@@ -113,6 +113,16 @@ pi-profile-manager install pi-omp
 pi-profile-manager verify all
 ```
 
+## Xem Profile Đã Cài
+
+Tool khác có thể đọc inventory ở chế độ read-only mà không scan home hoặc đoán đường dẫn profile:
+
+```bash
+pi-profile-manager profiles list --json
+```
+
+Command chỉ trả các profile có evidence tại config hoặc wrapper path cố định do Pi Profile Manager quản lý. Stdout là JSON theo schema version `1`; diagnostics chỉ ghi vào stderr. Exit code vẫn là `0` khi inventory rỗng hoặc có profile unhealthy; command chỉ trả non-zero khi không thể tạo inventory đáng tin cậy hoặc invocation không hợp lệ. `agentkitEnabled` yêu cầu AgentKit lifecycle evidence hợp lệ, `managed` xác minh ownership của manager, còn `healthy` kiểm tra thêm profile root, generated artifacts và runtime environment. Command không tự repair profile và không đọc credentials.
+
 ## Update
 
 Update manager theo npm dist-tag `latest`:
@@ -140,7 +150,7 @@ pi-profile-manager update omp --version 18.0.4
 Pin manager version để reproduce hoặc rollback:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.2 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.3 ppm-bootstrap install
 ```
 
 ## Status Và Uninstall

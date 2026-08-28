@@ -113,6 +113,16 @@ pi-profile-manager install pi-omp
 pi-profile-manager verify all
 ```
 
+## Discover installed profiles
+
+Tools can consume a read-only inventory without scanning the home directory or guessing profile paths:
+
+```bash
+pi-profile-manager profiles list --json
+```
+
+The command returns only profiles evidenced by Pi Profile Manager's fixed config or wrapper paths. JSON on stdout follows schema version `1`; diagnostics go to stderr. It exits `0` for an empty inventory and for profiles reported as unhealthy, and non-zero only when it cannot produce a trustworthy inventory or the invocation is invalid. `agentkitEnabled` requires valid AgentKit lifecycle evidence, `managed` verifies manager ownership, and `healthy` additionally verifies the profile root, generated artifacts, and runtime environment. The command never repairs profiles or reads credentials.
+
 ## Update
 
 Update the manager to the npm `latest` dist-tag:
@@ -140,7 +150,7 @@ pi-profile-manager update omp --version 18.0.4
 Pin a manager version for reproduction or rollback:
 
 ```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.2 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.3 ppm-bootstrap install
 ```
 
 ## Status and uninstall

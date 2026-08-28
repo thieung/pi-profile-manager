@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, sep } from "node:path";
 import test from "node:test";
 import { buildCmdInvocation, createWindowsProfileManager } from "../payload/pi-profile-manager-windows.mjs";
 
@@ -49,11 +49,11 @@ function fixture(name) {
           const profile = args[1];
           const manifest = join(piRoot(profile), "extensions", "agentkit-hooks-engineer", ".agentkit", "install-manifest.json");
           mkdirSync(join(manifest, ".."), { recursive: true });
-          writeFileSync(manifest, "{}\n");
+          writeFileSync(manifest, '{"version":1,"kit":"engineer","files":["AGENTS.md"]}\n');
         } else {
           const ownership = join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json");
           mkdirSync(join(ownership, ".."), { recursive: true });
-          writeFileSync(ownership, "{}\n");
+          writeFileSync(ownership, '{"version":1,"kit":"engineer","claims":["skills"]}\n');
         }
       }
     },
@@ -64,13 +64,17 @@ function fixture(name) {
       if (command === "pi" && args[0] === "--version") return "0.84.3";
       if (command === "mise" && args.includes("node") && args.includes("-e")) {
         const profile = args[1];
+        const script = args.at(-1);
         if (profile === "pi-omp") {
           return JSON.stringify({
             root: wrongOmpRoot ? join(home, ".omp", "agent") : ompRoot,
             pi: null,
           });
         }
-        return wrongPiRoot ? join(home, ".pi", "agent") : piRoot(profile);
+        const root = wrongPiRoot ? join(home, ".pi", "agent") : piRoot(profile);
+        return script.includes("JSON.stringify")
+          ? JSON.stringify({ root, session: join(piRoot(profile), "sessions") })
+          : root;
       }
       if (command === "mise" && args.includes("omp") && args.includes("--version")) return "omp/18.0.4";
       if (command === "mise" && args.includes("pi") && args.includes("list")) {
@@ -110,6 +114,94 @@ function fixture(name) {
     setWrongOmpRoot(value) { wrongOmpRoot = value; },
   };
 }
+
+function readInventory(fx) {
+  fx.stdout.length = 0;
+  fx.stderr.length = 0;
+  fx.manager.main(["profiles", "list", "--json"]);
+  return JSON.parse(fx.stdout.join(""));
+}
+
+test("Windows profile inventory returns stable schema for an empty installation", () => {
+  const fx = fixture("inventory-empty");
+  const inventory = readInventory(fx);
+  assert.deepEqual(inventory, { schemaVersion: 1, profiles: [] });
+  assert.equal(fx.stderr.join(""), "");
+  assert.equal(fx.stdout.join(""), `${JSON.stringify(inventory)}\n`);
+});
+
+test("Windows profile inventory reports a healthy pi-dev profile", () => {
+  const fx = fixture("inventory-pi-dev");
+  fx.manager.main(["install", "pi-dev"]);
+  const inventory = readInventory(fx);
+  assert.equal(inventory.schemaVersion, 1);
+  assert.equal(inventory.profiles.length, 1);
+  assert.deepEqual(inventory.profiles[0], {
+    id: "pi-dev",
+    runtime: "pi",
+    agentDir: join(fx.home, ".pi", "profiles", "pi-dev"),
+    sessionDir: join(fx.home, ".pi", "profiles", "pi-dev", "sessions"),
+    agentkitEnabled: false,
+    managed: true,
+    healthy: true,
+  });
+  assert.ok(isAbsolute(inventory.profiles[0].agentDir));
+  assert.ok(inventory.profiles[0].agentDir.includes(sep));
+  assert.equal(fx.stderr.join(""), "");
+  assert.doesNotMatch(fx.stdout.join(""), /INFO:|WARN:|RUN:/);
+});
+
+test("Windows profile inventory detects AgentKit for pi-ak", () => {
+  const fx = fixture("inventory-pi-ak");
+  fx.manager.main(["install", "pi-ak"]);
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles.length, 1);
+  assert.equal(inventory.profiles[0].id, "pi-ak");
+  assert.equal(inventory.profiles[0].agentkitEnabled, true);
+  assert.equal(inventory.profiles[0].managed, true);
+  assert.equal(inventory.profiles[0].healthy, true);
+});
+
+test("Windows profile inventory detects AgentKit for pi-omp", () => {
+  const fx = fixture("inventory-pi-omp");
+  fx.manager.main(["install", "pi-omp"]);
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles.length, 1);
+  assert.equal(inventory.profiles[0].id, "pi-omp");
+  assert.equal(inventory.profiles[0].runtime, "omp");
+  assert.equal(inventory.profiles[0].sessionDir, null);
+  assert.equal(inventory.profiles[0].agentkitEnabled, true);
+  assert.equal(inventory.profiles[0].managed, true);
+  assert.equal(inventory.profiles[0].healthy, true);
+});
+
+test("Windows profile inventory keeps managed drift visible but unhealthy", () => {
+  const fx = fixture("inventory-drift");
+  fx.manager.main(["install", "pi-dev"]);
+  const config = join(fx.home, ".config", "mise", "config.pi-dev.toml");
+  writeFileSync(config, `${readFileSync(config, "utf8")}# drift\n`);
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles[0].managed, true);
+  assert.equal(inventory.profiles[0].healthy, false);
+  assert.match(fx.stderr.join(""), /pi-dev managed artifacts are drifted/);
+  assert.equal(fx.stderr.join("").includes(fx.home), false);
+});
+
+test("Windows profile inventory reports foreign fixed artifacts as unmanaged", () => {
+  const fx = fixture("inventory-foreign");
+  const config = join(fx.home, ".config", "mise", "config.pi-ak.toml");
+  const wrapper = join(fx.home, "bin", "pi-ak.cmd");
+  mkdirSync(join(config, ".."), { recursive: true });
+  mkdirSync(join(wrapper, ".."), { recursive: true });
+  writeFileSync(config, "[env]\nPI_CODING_AGENT_DIR = 'foreign'\n");
+  writeFileSync(wrapper, "@echo user-owned\r\n");
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles[0].id, "pi-ak");
+  assert.equal(inventory.profiles[0].managed, false);
+  assert.equal(inventory.profiles[0].healthy, false);
+  assert.match(fx.stderr.join(""), /pi-ak managed evidence is incomplete or foreign/);
+  assert.equal(fx.stderr.join("").includes(fx.home), false);
+});
 
 test("Windows runtime rejects unsupported architecture before mutation", () => {
   const root = mkdtempSync(join(tmpdir(), "ppm-windows-arch-"));

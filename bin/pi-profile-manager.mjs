@@ -39,6 +39,7 @@ After install:
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
   pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
+  pi-profile-manager profiles list --json
   pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
 `);
 }

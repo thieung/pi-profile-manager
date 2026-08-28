@@ -23,6 +23,7 @@ Usage:
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
   pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
+  pi-profile-manager profiles list --json
   pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
 
 The script never reads or writes provider credentials. AgentKit is invoked only
@@ -301,6 +302,220 @@ assert_omp_profile_root() {
   [[ "$pi_value" == "unset" ]] \
     || fail "pi-omp unexpectedly inherits PI_CODING_AGENT_DIR='$pi_value'"
   info "pi-omp root verified: $actual_root"
+}
+
+profiles_list_json() {
+  require_command node
+  PPM_PROFILE_HOME="$HOME" node <<'NODE'
+const { spawnSync } = require("node:child_process");
+const { lstatSync, readFileSync } = require("node:fs");
+const { join, resolve } = require("node:path");
+
+const runtimeEnv = process["env"];
+const home = runtimeEnv.PPM_PROFILE_HOME;
+const schemaVersion = 1;
+
+function warn(message) {
+  process.stderr.write(`WARN: ${message}\n`);
+}
+
+function readRegular(path) {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile()) return { exists: true, regular: false, content: "" };
+    return { exists: true, regular: true, content: readFileSync(path, "utf8") };
+  } catch (error) {
+    if (error && error.code === "ENOENT") return { exists: false, regular: false, content: "" };
+    throw error;
+  }
+}
+
+function isDirectory(path) {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isExecutableFile(path) {
+  try {
+    const stat = lstatSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function piRoot(profile) {
+  return join(home, ".pi", "profiles", profile);
+}
+
+function ompRoot() {
+  return join(home, ".omp", "profiles", "pi-omp", "agent");
+}
+
+function piConfigContent(profile) {
+  return [
+    "[env]",
+    `PI_CODING_AGENT_DIR = "{{ env.HOME }}/.pi/profiles/${profile}"`,
+    `PI_CODING_AGENT_SESSION_DIR = "{{ env.HOME }}/.pi/profiles/${profile}/sessions"`,
+    "OMP_PROFILE = false",
+    "PI_PROFILE = false",
+    "",
+  ].join("\n");
+}
+
+function ompConfigContent() {
+  return [
+    "[env]",
+    'OMP_PROFILE = "pi-omp"',
+    'AGENTKIT_OMP_HOME = "{{ env.HOME }}/.omp/profiles/pi-omp/agent"',
+    "PI_PROFILE = false",
+    "PI_CODING_AGENT_DIR = false",
+    "PI_CODING_AGENT_SESSION_DIR = false",
+    "",
+  ].join("\n");
+}
+
+function wrapperContent(profile, executable) {
+  return [
+    "#!/bin/sh",
+    `exec mise -E ${profile} exec -- ${executable} "$@"`,
+    "",
+  ].join("\n");
+}
+
+function capture(profile, args, label) {
+  const result = spawnSync(args[0], args.slice(1), {
+    encoding: "utf8",
+    env: runtimeEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    warn(`${profile} ${label} did not resolve`);
+    return null;
+  }
+  return result.stdout.trim();
+}
+
+function piRuntimeHealthy(profile, agentDir, sessionDir) {
+  const script = 'printf "%s\\n%s" "$PI_CODING_AGENT_DIR" "$PI_CODING_AGENT_SESSION_DIR"';
+  const output = capture(profile, ["mise", "-E", profile, "exec", "--", "sh", "-c", script], "runtime environment");
+  if (output === null) return false;
+  const [actualAgentDir, actualSessionDir] = output.split("\n");
+  return resolve(actualAgentDir || "") === resolve(agentDir) &&
+    resolve(actualSessionDir || "") === resolve(sessionDir);
+}
+
+function ompRuntimeHealthy(agentDir) {
+  const envScript = 'printf "%s\\n%s" "$AGENTKIT_OMP_HOME" "${PI_CODING_AGENT_DIR-unset}"';
+  const output = capture("pi-omp", ["mise", "-E", "pi-omp", "exec", "--", "sh", "-c", envScript], "runtime environment");
+  if (output === null) return false;
+  const [actualAgentDir, piValue] = output.split("\n");
+  if (resolve(actualAgentDir || "") !== resolve(agentDir) || piValue !== "unset") return false;
+  const runtimeRoot = capture("pi-omp", ["mise", "-E", "pi-omp", "exec", "--", "omp", "config", "path"], "config path");
+  return runtimeRoot !== null && resolve(runtimeRoot) === resolve(agentDir);
+}
+
+function readJsonObject(path, profile, label) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!stat.isFile()) {
+    warn(`${profile} AgentKit ${label} is not a regular file`);
+    return null;
+  }
+  const content = readFileSync(path, "utf8");
+  try {
+    const value = JSON.parse(content);
+    if (!value || Array.isArray(value) || typeof value !== "object") {
+      warn(`${profile} AgentKit ${label} is not a JSON object`);
+      return null;
+    }
+    return value;
+  } catch {
+    warn(`${profile} AgentKit ${label} is invalid`);
+    return null;
+  }
+}
+
+function piAgentKitEnabled(profile, agentDir) {
+  const manifest = readJsonObject(
+    join(agentDir, "extensions", "agentkit-hooks-engineer", ".agentkit", "install-manifest.json"),
+    profile,
+    "manifest",
+  );
+  return Boolean(manifest && manifest.version === 1 && manifest.kit === "engineer" && Array.isArray(manifest.files));
+}
+
+function ompAgentKitEnabled() {
+  const ownership = readJsonObject(
+    join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"),
+    "pi-omp",
+    "ownership",
+  );
+  return Boolean(ownership && ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+}
+
+function piProfile(profile) {
+  const agentDir = piRoot(profile);
+  const sessionDir = join(agentDir, "sessions");
+  const configPath = join(home, ".config", "mise", `config.${profile}.toml`);
+  const wrapperPath = join(home, ".local", "bin", profile);
+  const config = readRegular(configPath);
+  const wrapper = readRegular(wrapperPath);
+  if (!config.exists && !wrapper.exists) return null;
+  const managed = config.regular && wrapper.regular &&
+    config.content === piConfigContent(profile) &&
+    wrapper.content === wrapperContent(profile, "pi");
+  if (!managed) warn(`${profile} managed evidence is incomplete or drifted`);
+  const runtimeHealthy = managed && piRuntimeHealthy(profile, agentDir, sessionDir);
+  const healthy = managed && isDirectory(agentDir) && isDirectory(sessionDir) &&
+    isExecutableFile(wrapperPath) && runtimeHealthy;
+  return {
+    id: profile,
+    runtime: "pi",
+    agentDir: resolve(agentDir),
+    sessionDir: resolve(sessionDir),
+    agentkitEnabled: piAgentKitEnabled(profile, agentDir),
+    managed,
+    healthy,
+  };
+}
+
+function ompProfile() {
+  const agentDir = ompRoot();
+  const configPath = join(home, ".config", "mise", "config.pi-omp.toml");
+  const wrapperPath = join(home, ".local", "bin", "pi-omp");
+  const config = readRegular(configPath);
+  const wrapper = readRegular(wrapperPath);
+  if (!config.exists && !wrapper.exists) return null;
+  const managed = config.regular && wrapper.regular &&
+    config.content === ompConfigContent() &&
+    wrapper.content === wrapperContent("pi-omp", "omp");
+  if (!managed) warn("pi-omp managed evidence is incomplete or drifted");
+  const runtimeHealthy = managed && ompRuntimeHealthy(agentDir);
+  return {
+    id: "pi-omp",
+    runtime: "omp",
+    agentDir: resolve(agentDir),
+    sessionDir: null,
+    agentkitEnabled: ompAgentKitEnabled(),
+    managed,
+    healthy: managed && isDirectory(agentDir) && isExecutableFile(wrapperPath) && runtimeHealthy,
+  };
+}
+
+const profiles = [piProfile("pi-dev"), piProfile("pi-ak"), ompProfile()].filter(Boolean);
+process.stdout.write(`${JSON.stringify({ schemaVersion, profiles })}\n`);
+NODE
 }
 
 install_pi_binary() {
@@ -687,6 +902,13 @@ main() {
       shift
       parse_options "$@"
       update_target "$target"
+      ;;
+    profiles)
+      target="${1:-}"
+      [[ "$target" == "list" ]] || fail "profiles requires: list --json"
+      shift
+      [[ "${1:-}" == "--json" && "$#" -eq 1 ]] || fail "profiles list requires --json"
+      profiles_list_json
       ;;
     verify)
       target="${1:-all}"

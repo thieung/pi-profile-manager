@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$REPO_ROOT/payload/pi-profile-manager"
+NODE_BIN="$(command -v node)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pi-profile-manager-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -137,10 +138,10 @@ while [[ "$#" -gt 0 ]]; do
 done
 if [[ "$target" == "pi" ]]; then
   mkdir -p "$PI_CODING_AGENT_DIR/extensions/agentkit-hooks-engineer/.agentkit"
-  printf '{}\n' >"$PI_CODING_AGENT_DIR/extensions/agentkit-hooks-engineer/.agentkit/install-manifest.json"
+  printf '{"version":1,"kit":"engineer","files":["AGENTS.md"]}\n' >"$PI_CODING_AGENT_DIR/extensions/agentkit-hooks-engineer/.agentkit/install-manifest.json"
 elif [[ "$target" == "omp" ]]; then
   mkdir -p "$AGENTKIT_OMP_HOME/skills" "$HOME/.agentkit/adapters/omp/engineer"
-  printf '{}\n' >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
+  printf '{"version":1,"kit":"engineer","claims":["skills"]}\n' >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
 fi
 FAKE_AK
 
@@ -199,17 +200,37 @@ new_case() {
   FAKE_BIN="$CASE_ROOT/bin"
   CALL_LOG="$CASE_ROOT/calls.log"
   OUTPUT="$CASE_ROOT/output.log"
+  ERROR_OUTPUT="$CASE_ROOT/error.log"
   TMPDIR="$CASE_ROOT/tmp"
   export HOME CALL_LOG TMPDIR
   mkdir -p "$HOME" "$FAKE_BIN" "$TMPDIR"
   : >"$CALL_LOG"
+  : >"$ERROR_OUTPUT"
   make_fake_tools "$FAKE_BIN"
+  ln -s "$NODE_BIN" "$FAKE_BIN/node"
   PATH="$FAKE_BIN:/usr/bin:/bin"
   export PATH
 }
 
 run_manager() {
   /bin/bash "$SCRIPT" "$@" >"$OUTPUT" 2>&1
+}
+
+run_manager_split() {
+  /bin/bash "$SCRIPT" "$@" >"$OUTPUT" 2>"$ERROR_OUTPUT"
+}
+
+json_eval() {
+  # shellcheck disable=SC2016
+  "$NODE_BIN" -e 'const fs = require("node:fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const value = Function("data", `return (${process.argv[2]})`)(data); process.stdout.write(typeof value === "string" ? value : JSON.stringify(value));' "$OUTPUT" "$1"
+}
+
+assert_json_eq() {
+  local expected="$1"
+  local expression="$2"
+  local actual
+  actual="$(json_eval "$expression")"
+  [[ "$actual" == "$expected" ]] || fail "expected JSON $expression to be '$expected', got '$actual'"
 }
 
 test_bootstrap_dry_run_has_no_mutation() {
@@ -356,6 +377,99 @@ test_dry_run_all_has_no_tool_invocation() {
   [[ ! -s "$CALL_LOG" ]] || fail "dry-run all invoked a fake dependency"
   assert_contains 'OMP target version: latest (not resolved during dry-run)' "$OUTPUT"
   printf 'ok: dry-run all has no tool invocation\n'
+}
+
+test_profiles_inventory_empty() {
+  new_case profiles-empty
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.schemaVersion'
+  assert_json_eq '0' 'data.profiles.length'
+  [[ ! -s "$ERROR_OUTPUT" ]] || fail "empty inventory wrote diagnostics"
+  printf 'ok: profile inventory returns an empty schema v1 payload\n'
+}
+
+test_profiles_inventory_pi_dev() {
+  local expected_agent_dir
+  local expected_session_dir
+  new_case profiles-pi-dev
+  run_manager install pi-dev
+  expected_agent_dir="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$HOME/.pi/profiles/pi-dev")"
+  expected_session_dir="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$HOME/.pi/profiles/pi-dev/sessions")"
+  : >"$CALL_LOG"
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'pi-dev' 'data.profiles[0].id'
+  assert_json_eq 'pi' 'data.profiles[0].runtime'
+  assert_json_eq "$expected_agent_dir" 'data.profiles[0].agentDir'
+  assert_json_eq "$expected_session_dir" 'data.profiles[0].sessionDir'
+  assert_json_eq 'false' 'data.profiles[0].agentkitEnabled'
+  assert_json_eq 'true' 'data.profiles[0].managed'
+  assert_json_eq 'true' 'data.profiles[0].healthy'
+  assert_not_contains 'INFO:' "$OUTPUT"
+  assert_not_contains 'WARN:' "$OUTPUT"
+  assert_not_contains 'RUN:' "$OUTPUT"
+  [[ ! -s "$ERROR_OUTPUT" ]] || fail "healthy pi-dev inventory wrote diagnostics"
+  printf 'ok: profile inventory reports installed pi-dev\n'
+}
+
+test_profiles_inventory_pi_ak_agentkit() {
+  new_case profiles-pi-ak
+  run_manager install pi-ak
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'pi-ak' 'data.profiles[0].id'
+  assert_json_eq 'pi' 'data.profiles[0].runtime'
+  assert_json_eq 'true' 'data.profiles[0].agentkitEnabled'
+  assert_json_eq 'true' 'data.profiles[0].managed'
+  assert_json_eq 'true' 'data.profiles[0].healthy'
+  printf 'ok: profile inventory reports pi-ak AgentKit evidence\n'
+}
+
+test_profiles_inventory_pi_omp_agentkit() {
+  local expected_agent_dir
+  new_case profiles-pi-omp
+  run_manager install pi-omp
+  expected_agent_dir="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$HOME/.omp/profiles/pi-omp/agent")"
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'pi-omp' 'data.profiles[0].id'
+  assert_json_eq 'omp' 'data.profiles[0].runtime'
+  assert_json_eq "$expected_agent_dir" 'data.profiles[0].agentDir'
+  assert_json_eq 'null' 'data.profiles[0].sessionDir'
+  assert_json_eq 'true' 'data.profiles[0].agentkitEnabled'
+  assert_json_eq 'true' 'data.profiles[0].managed'
+  assert_json_eq 'true' 'data.profiles[0].healthy'
+  printf 'ok: profile inventory reports pi-omp AgentKit evidence\n'
+}
+
+test_profiles_inventory_drift_is_unhealthy() {
+  new_case profiles-drift
+  run_manager install pi-dev
+  printf '# drift\n' >>"$HOME/.local/bin/pi-dev"
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'pi-dev' 'data.profiles[0].id'
+  assert_json_eq 'false' 'data.profiles[0].managed'
+  assert_json_eq 'false' 'data.profiles[0].healthy'
+  assert_contains 'managed evidence is incomplete or drifted' "$ERROR_OUTPUT"
+  assert_not_contains "$HOME" "$ERROR_OUTPUT"
+  printf 'ok: profile inventory marks drifted artifacts unhealthy without absolute-path diagnostics\n'
+}
+
+test_profiles_inventory_foreign_is_unhealthy() {
+  new_case profiles-foreign
+  mkdir -p "$HOME/.config/mise" "$HOME/.local/bin"
+  printf '[env]\nPI_CODING_AGENT_DIR = "foreign"\n' >"$HOME/.config/mise/config.pi-ak.toml"
+  printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/pi-ak"
+  chmod 0755 "$HOME/.local/bin/pi-ak"
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'pi-ak' 'data.profiles[0].id'
+  assert_json_eq 'false' 'data.profiles[0].managed'
+  assert_json_eq 'false' 'data.profiles[0].healthy'
+  assert_contains 'managed evidence is incomplete or drifted' "$ERROR_OUTPUT"
+  assert_not_contains "$HOME" "$ERROR_OUTPUT"
+  printf 'ok: profile inventory includes foreign fixed-path artifacts as unmanaged unhealthy\n'
 }
 
 test_pi_dev_install_and_idempotency() {
@@ -514,6 +628,12 @@ test_bootstrap_verification_failure_cleans_up
 test_bootstrap_refuses_non_executable_target
 test_dry_run_has_no_mutation
 test_dry_run_all_has_no_tool_invocation
+test_profiles_inventory_empty
+test_profiles_inventory_pi_dev
+test_profiles_inventory_pi_ak_agentkit
+test_profiles_inventory_pi_omp_agentkit
+test_profiles_inventory_drift_is_unhealthy
+test_profiles_inventory_foreign_is_unhealthy
 test_pi_dev_install_and_idempotency
 test_changed_managed_file_is_backed_up
 test_agentkit_targets
