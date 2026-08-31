@@ -7,6 +7,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -305,13 +306,58 @@ export function createWindowsProfileManager(options = {}) {
     return Boolean(manifest && manifest.version === 1 && manifest.kit === "engineer" && Array.isArray(manifest.files));
   }
 
-  function ompAgentKitEnabled() {
+  function hasAkSkills(root) {
+    const skillsRoot = join(root, "skills");
+    try {
+      return readdirSync(skillsRoot, { withFileTypes: true }).some((entry) =>
+        entry.isDirectory() && entry.name.startsWith("ak-") && existsSync(join(skillsRoot, entry.name, "SKILL.md")),
+      );
+    } catch (error) {
+      if (error && error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  function isUnderRoot(path, root) {
+    const rel = relative(resolve(root), resolve(path));
+    return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+  }
+
+  function collectStrings(value, output = []) {
+    if (typeof value === "string") output.push(value);
+    else if (Array.isArray(value)) value.forEach((entry) => collectStrings(entry, output));
+    else if (value && typeof value === "object") Object.values(value).forEach((entry) => collectStrings(entry, output));
+    return output;
+  }
+
+  function hasWrongOmpClaims(value, root) {
+    if (!value) return false;
+    for (const text of collectStrings(value)) {
+      const normalized = text.replaceAll("\\", "/");
+      const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+      if (!pathClaim) continue;
+      if (!isUnderRoot(text, root)) return true;
+    }
+    return false;
+  }
+
+  function ompClaimsStayInProfile(root) {
     const ownership = readJsonObject(
       join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"),
       "pi-omp",
       "ownership",
     );
-    return Boolean(ownership && ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+    const nativePaths = readJsonObject(
+      join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"),
+      "pi-omp",
+      "native skill paths",
+    );
+    if (hasWrongOmpClaims(ownership, root) || hasWrongOmpClaims(nativePaths, root)) return false;
+    return !ownership || (ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+  }
+
+  function ompAgentKitEnabled() {
+    return hasAkSkills(ompProfileRoot) && ompClaimsStayInProfile(ompProfileRoot);
   }
 
   function piRuntimeHealthy(profile) {
@@ -546,6 +592,49 @@ export function createWindowsProfileManager(options = {}) {
     }
   }
 
+  function firstOmpAkSkill() {
+    const skillsRoot = join(ompProfileRoot, "skills");
+    try {
+      for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
+        const skill = join(skillsRoot, entry.name, "SKILL.md");
+        if (entry.isDirectory() && entry.name.startsWith("ak-") && existsSync(skill)) return skill;
+      }
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
+    return null;
+  }
+
+  function firstWrongOmpClaim() {
+    const ownership = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"), "pi-omp", "ownership");
+    const nativePaths = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"), "pi-omp", "native skill paths");
+    for (const value of [ownership, nativePaths]) {
+      for (const text of collectStrings(value)) {
+        const normalized = text.replaceAll("\\", "/");
+        const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+        if (!pathClaim || isUnderRoot(text, ompProfileRoot)) continue;
+        return text;
+      }
+    }
+    return null;
+  }
+
+  function assertOmpAgentKitInstalled() {
+    const skill = firstOmpAkSkill();
+    const wrongClaim = firstWrongOmpClaim();
+    if (skill && !wrongClaim) return skill;
+    const defaultSkills = join(home, ".omp", "agent", "skills");
+    const found = skill || (existsSync(defaultSkills) ? defaultSkills : "none");
+    throw new Error([
+      "pi-omp AgentKit skills were not installed into the named OMP profile.",
+      `AGENTKIT_OMP_HOME=${ompProfileRoot}`,
+      `actual skills root found=${found}`,
+      `wrong default destination=${defaultSkills}`,
+      wrongClaim ? `out-of-profile claim=${wrongClaim}` : null,
+      "repair: re-run pi-profile-manager install pi-omp",
+    ].filter(Boolean).join(" "));
+  }
+
   function installAgentKit(profile, target) {
     requireCommand("ak");
     if (target === "pi") assertPiProfileRoot(profile);
@@ -554,6 +643,14 @@ export function createWindowsProfileManager(options = {}) {
       "-E", profile, "exec", "--", "ak", "kit", "init", "engineer",
       "--target", target, "--global", "--channel", "beta", "--yes", "--no-interactive",
     ]);
+    if (target === "omp") {
+      if (dryRun) {
+        info(`would assert AgentKit skills under: ${join(ompProfileRoot, "skills", "ak-*", "SKILL.md")}`);
+        info(`would reject default OMP AgentKit destination: ${join(home, ".omp", "agent", "skills")}`);
+      } else {
+        info(`pi-omp AgentKit skill verified: ${assertOmpAgentKitInstalled()}`);
+      }
+    }
   }
 
   function preflightInstall(target) {
@@ -722,8 +819,7 @@ export function createWindowsProfileManager(options = {}) {
     if (resolve(runtimeRoot).toLowerCase() !== resolve(ompProfileRoot).toLowerCase()) {
       throw new Error(`pi-omp config path '${runtimeRoot}'; expected '${ompProfileRoot}'`);
     }
-    const ownership = join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json");
-    if (!existsSync(ownership)) throw new Error("pi-omp missing AgentKit ownership index");
+    assertOmpAgentKitInstalled();
     info("pi-omp verification passed");
   }
 

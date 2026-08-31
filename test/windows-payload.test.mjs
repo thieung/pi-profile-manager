@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, sep } from "node:path";
 import test from "node:test";
@@ -28,6 +28,7 @@ function fixture(name) {
   const commands = new Set(["mise", "npm", "ak"]);
   let wrongPiRoot = false;
   let wrongOmpRoot = false;
+  let ompAkDest = "profile";
 
   const piRoot = (profile) => join(home, ".pi", "profiles", profile);
   const ompRoot = join(home, ".omp", "profiles", "pi-omp", "agent");
@@ -51,9 +52,13 @@ function fixture(name) {
           mkdirSync(join(manifest, ".."), { recursive: true });
           writeFileSync(manifest, '{"version":1,"kit":"engineer","files":["AGENTS.md"]}\n');
         } else {
-          const ownership = join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json");
-          mkdirSync(join(ownership, ".."), { recursive: true });
-          writeFileSync(ownership, '{"version":1,"kit":"engineer","claims":["skills"]}\n');
+          const adapterRoot = join(home, ".agentkit", "adapters", "omp", "engineer");
+          const skillRoot = ompAkDest === "default" ? join(home, ".omp", "agent", "skills") : join(ompRoot, "skills");
+          mkdirSync(join(skillRoot, "ak-cook"), { recursive: true });
+          writeFileSync(join(skillRoot, "ak-cook", "SKILL.md"), "---\nname: ak-cook\ndescription: fake AgentKit cook skill\n---\n");
+          mkdirSync(join(adapterRoot, ".agentkit"), { recursive: true });
+          writeFileSync(join(adapterRoot, "omp-ownership.json"), JSON.stringify({ version: 1, kit: "engineer", claims: [skillRoot] }));
+          writeFileSync(join(adapterRoot, ".agentkit", "native-skill-paths.json"), JSON.stringify({ skills: [join(skillRoot, "ak-cook", "SKILL.md")] }));
         }
       }
     },
@@ -112,6 +117,7 @@ function fixture(name) {
     stderr,
     setWrongPiRoot(value) { wrongPiRoot = value; },
     setWrongOmpRoot(value) { wrongOmpRoot = value; },
+    setOmpAkDest(value) { ompAkDest = value; },
   };
 }
 
@@ -173,6 +179,32 @@ test("Windows profile inventory detects AgentKit for pi-omp", () => {
   assert.equal(inventory.profiles[0].agentkitEnabled, true);
   assert.equal(inventory.profiles[0].managed, true);
   assert.equal(inventory.profiles[0].healthy, true);
+});
+
+test("Windows pi-omp AgentKit install fails closed when ak writes default OMP destination", () => {
+  const fx = fixture("pi-omp-ak-default-dest");
+  fx.setOmpAkDest("default");
+  assert.throws(() => fx.manager.main(["install", "pi-omp"]), /not installed into the named OMP profile/);
+  assert.equal(existsSync(join(fx.home, ".omp", "agent", "skills", "ak-cook", "SKILL.md")), true);
+});
+
+test("Windows pi-omp inventory and verify reject ownership without profile skills", () => {
+  const fx = fixture("pi-omp-ak-missing-skills");
+  fx.manager.main(["install", "pi-omp"]);
+  rmSync(join(fx.home, ".omp", "profiles", "pi-omp", "agent", "skills"), { recursive: true, force: true });
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles[0].agentkitEnabled, false);
+  assert.throws(() => fx.manager.main(["verify", "pi-omp"]), /not installed into the named OMP profile/);
+});
+
+test("Windows pi-omp inventory and verify reject default OMP native skill claims", () => {
+  const fx = fixture("pi-omp-ak-wrong-claim");
+  fx.manager.main(["install", "pi-omp"]);
+  const nativePaths = join(fx.home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json");
+  writeFileSync(nativePaths, JSON.stringify({ skills: [join(fx.home, ".omp", "agent", "skills", "ak-cook", "SKILL.md")] }));
+  const inventory = readInventory(fx);
+  assert.equal(inventory.profiles[0].agentkitEnabled, false);
+  assert.throws(() => fx.manager.main(["verify", "pi-omp"]), /out-of-profile claim/);
 });
 
 test("Windows profile inventory accepts exactly one legacy extra newline", () => {
