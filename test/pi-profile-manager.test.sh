@@ -23,13 +23,13 @@ assert_not_exists() {
 assert_contains() {
   local needle="$1"
   local file="$2"
-  grep -F "$needle" "$file" >/dev/null || fail "missing '$needle' in $file"
+  grep -F -- "$needle" "$file" >/dev/null || fail "missing '$needle' in $file"
 }
 
 assert_not_contains() {
   local needle="$1"
   local file="$2"
-  if grep -F "$needle" "$file" >/dev/null; then
+  if grep -F -- "$needle" "$file" >/dev/null; then
     fail "unexpected '$needle' in $file"
   fi
 }
@@ -108,6 +108,9 @@ case "${1:-}" in
       'npm:@tintinweb/pi-subagents@0.18.0'; do
       printf '%s %s/npm/node_modules\n' "$extension" "$PI_CODING_AGENT_DIR"
     done
+    ;;
+  *)
+    printf 'pi|%s|%s\n' "${PI_CODING_AGENT_DIR:-unset}" "$*" >>"$CALL_LOG"
     ;;
 esac
 FAKE_PI
@@ -548,6 +551,71 @@ test_agentkit_targets() {
   printf 'ok: AgentKit uses explicit Pi and OMP targets\n'
 }
 
+test_pi_wrapper_isolates_session_skills() {
+  new_case pi-wrapper-session
+  run_manager install pi-ak
+  mkdir -p "$HOME/.pi/profiles/pi-ak/skills/ak-cook"
+  printf '%s\n' '---' 'name: ak-cook' '---' >"$HOME/.pi/profiles/pi-ak/skills/ak-cook/SKILL.md"
+  : >"$CALL_LOG"
+  "$HOME/.local/bin/pi-ak" --help
+  assert_contains "pi|$HOME/.pi/profiles/pi-ak|--no-skills --skill $HOME/.pi/profiles/pi-ak/skills --help" "$CALL_LOG"
+  assert_not_contains '.agents/skills' "$CALL_LOG"
+  mkdir -p "$CASE_ROOT/work/.pi/skills/project-skill"
+  printf '%s\n' '---' 'name: project-skill' '---' >"$CASE_ROOT/work/.pi/skills/project-skill/SKILL.md"
+  : >"$CALL_LOG"
+  (cd "$CASE_ROOT/work" && "$HOME/.local/bin/pi-ak" chat prompt)
+  assert_contains "pi|$HOME/.pi/profiles/pi-ak|--no-skills --skill $HOME/.pi/profiles/pi-ak/skills --skill " "$CALL_LOG"
+  assert_contains "pi-wrapper-session/work/.pi/skills chat prompt" "$CALL_LOG"
+  printf 'ok: pi wrapper isolates session skill discovery\n'
+}
+
+test_pi_wrapper_keeps_lifecycle_pass_through() {
+  new_case pi-wrapper-lifecycle
+  run_manager install pi-ak
+  : >"$CALL_LOG"
+  "$HOME/.local/bin/pi-ak" install npm:statusline-pi@1.2.1
+  assert_contains "pi|$HOME/.pi/profiles/pi-ak|install npm:statusline-pi@1.2.1" "$CALL_LOG"
+  assert_not_contains "pi|$HOME/.pi/profiles/pi-ak|--no-skills" "$CALL_LOG"
+  printf 'ok: pi wrapper keeps lifecycle commands pass-through\n'
+}
+
+test_pi_wrapper_falls_back_without_pi_sources() {
+  new_case pi-wrapper-fallback
+  run_manager install pi-dev
+  rm -rf "$HOME/.pi/profiles/pi-dev/skills"
+  : >"$CALL_LOG"
+  "$HOME/.local/bin/pi-dev" --help
+  assert_contains "pi|$HOME/.pi/profiles/pi-dev|--help" "$CALL_LOG"
+  assert_not_contains "pi|$HOME/.pi/profiles/pi-dev|--no-skills" "$CALL_LOG"
+  printf 'ok: pi wrapper falls back when profile and project Pi sources are absent\n'
+}
+
+test_pi_wrapper_refuses_user_owned_rewrite() {
+  new_case pi-wrapper-user-owned
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/pi-ak"
+  chmod 0755 "$HOME/.local/bin/pi-ak"
+  if run_manager install pi-ak; then
+    fail "user-owned pi-ak wrapper unexpectedly replaced"
+  fi
+  assert_contains 'refusing to overwrite user-owned wrapper without managed marker' "$OUTPUT"
+  assert_contains 'exit 0' "$HOME/.local/bin/pi-ak"
+  printf 'ok: pi wrapper refuses user-owned rewrite\n'
+}
+
+test_pi_wrapper_refuses_marker_substring_rewrite() {
+  new_case pi-wrapper-marker-substring
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/bin/sh\n# not managed by pi-profile-manager\nexit 0\n' >"$HOME/.local/bin/pi-ak"
+  chmod 0755 "$HOME/.local/bin/pi-ak"
+  if run_manager install pi-ak; then
+    fail "marker-substring pi-ak wrapper unexpectedly replaced"
+  fi
+  assert_contains 'refusing to overwrite user-owned wrapper without managed marker' "$OUTPUT"
+  assert_contains 'not managed by pi-profile-manager' "$HOME/.local/bin/pi-ak"
+  printf 'ok: pi wrapper refuses marker substring rewrite\n'
+}
+
 test_pi_omp_agentkit_fails_when_ak_writes_default_dest() {
   new_case pi-omp-ak-default-dest
   export FAKE_AK_OMP_DEST=default
@@ -717,6 +785,11 @@ test_profiles_inventory_foreign_is_unhealthy
 test_pi_dev_install_and_idempotency
 test_changed_managed_file_is_backed_up
 test_agentkit_targets
+test_pi_wrapper_isolates_session_skills
+test_pi_wrapper_keeps_lifecycle_pass_through
+test_pi_wrapper_falls_back_without_pi_sources
+test_pi_wrapper_refuses_user_owned_rewrite
+test_pi_wrapper_refuses_marker_substring_rewrite
 test_pi_omp_agentkit_fails_when_ak_writes_default_dest
 test_pi_omp_agentkit_missing_profile_skills_disables_inventory_and_verify
 test_pi_omp_agentkit_wrong_claim_disables_inventory_and_verify
