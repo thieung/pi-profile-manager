@@ -140,8 +140,15 @@ if [[ "$target" == "pi" ]]; then
   mkdir -p "$PI_CODING_AGENT_DIR/extensions/agentkit-hooks-engineer/.agentkit"
   printf '{"version":1,"kit":"engineer","files":["AGENTS.md"]}\n' >"$PI_CODING_AGENT_DIR/extensions/agentkit-hooks-engineer/.agentkit/install-manifest.json"
 elif [[ "$target" == "omp" ]]; then
-  mkdir -p "$AGENTKIT_OMP_HOME/skills" "$HOME/.agentkit/adapters/omp/engineer"
-  printf '{"version":1,"kit":"engineer","claims":["skills"]}\n' >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
+  mkdir -p "$HOME/.agentkit/adapters/omp/engineer/.agentkit"
+  skill_root="$AGENTKIT_OMP_HOME/skills"
+  if [[ "${FAKE_AK_OMP_DEST:-profile}" == "default" ]]; then
+    skill_root="$HOME/.omp/agent/skills"
+  fi
+  mkdir -p "$skill_root/ak-cook"
+  printf '%s\n' '---' 'name: ak-cook' 'description: fake AgentKit cook skill' '---' >"$skill_root/ak-cook/SKILL.md"
+  printf '{"version":1,"kit":"engineer","claims":["%s"]}\n' "$skill_root" >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
+  printf '{"skills":["%s/ak-cook/SKILL.md"]}\n' "$skill_root" >"$HOME/.agentkit/adapters/omp/engineer/.agentkit/native-skill-paths.json"
 fi
 FAKE_AK
 
@@ -537,7 +544,50 @@ test_agentkit_targets() {
   run_manager install pi-omp
   assert_contains "ak|unset|$HOME/.omp/profiles/pi-omp/agent|kit init engineer --target omp" "$CALL_LOG"
   assert_file "$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
+  assert_file "$HOME/.omp/profiles/pi-omp/agent/skills/ak-cook/SKILL.md"
   printf 'ok: AgentKit uses explicit Pi and OMP targets\n'
+}
+
+test_pi_omp_agentkit_fails_when_ak_writes_default_dest() {
+  new_case pi-omp-ak-default-dest
+  export FAKE_AK_OMP_DEST=default
+  if run_manager install pi-omp; then
+    fail "pi-omp install unexpectedly passed with default OMP AgentKit destination"
+  fi
+  unset FAKE_AK_OMP_DEST
+  assert_contains 'not installed into the named OMP profile' "$OUTPUT"
+  assert_contains 'AGENTKIT_OMP_HOME=' "$OUTPUT"
+  assert_contains 'wrong default destination=' "$OUTPUT"
+  assert_contains 'repair: re-run pi-profile-manager install pi-omp' "$OUTPUT"
+  assert_file "$HOME/.omp/agent/skills/ak-cook/SKILL.md"
+  printf 'ok: pi-omp AgentKit fails closed on default destination\n'
+}
+
+test_pi_omp_agentkit_missing_profile_skills_disables_inventory_and_verify() {
+  new_case pi-omp-ak-missing-skills
+  run_manager install pi-omp
+  rm -rf "$HOME/.omp/profiles/pi-omp/agent/skills"
+  run_manager_split profiles list --json
+  assert_json_eq 'false' 'data.profiles[0].agentkitEnabled'
+  if run_manager verify pi-omp; then
+    fail "pi-omp verify unexpectedly passed without profile-local AgentKit skills"
+  fi
+  assert_contains 'not installed into the named OMP profile' "$OUTPUT"
+  printf 'ok: pi-omp AgentKit missing skills disables inventory and verify\n'
+}
+
+test_pi_omp_agentkit_wrong_claim_disables_inventory_and_verify() {
+  new_case pi-omp-ak-wrong-claim
+  run_manager install pi-omp
+  mkdir -p "$HOME/.agentkit/adapters/omp/engineer/.agentkit"
+  printf '{"skills":["%s/.omp/agent/skills/ak-cook/SKILL.md"]}\n' "$HOME" >"$HOME/.agentkit/adapters/omp/engineer/.agentkit/native-skill-paths.json"
+  run_manager_split profiles list --json
+  assert_json_eq 'false' 'data.profiles[0].agentkitEnabled'
+  if run_manager verify pi-omp; then
+    fail "pi-omp verify unexpectedly passed with default OMP AgentKit claim"
+  fi
+  assert_contains 'out-of-profile claim' "$OUTPUT"
+  printf 'ok: pi-omp AgentKit wrong claims disable inventory and verify\n'
 }
 
 test_wrong_root_stops_extensions() {
@@ -667,6 +717,9 @@ test_profiles_inventory_foreign_is_unhealthy
 test_pi_dev_install_and_idempotency
 test_changed_managed_file_is_backed_up
 test_agentkit_targets
+test_pi_omp_agentkit_fails_when_ak_writes_default_dest
+test_pi_omp_agentkit_missing_profile_skills_disables_inventory_and_verify
+test_pi_omp_agentkit_wrong_claim_disables_inventory_and_verify
 test_wrong_root_stops_extensions
 test_exact_updates
 test_wrong_root_stops_updates

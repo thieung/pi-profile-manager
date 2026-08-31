@@ -308,8 +308,8 @@ profiles_list_json() {
   require_command node
   PPM_PROFILE_HOME="$HOME" node <<'NODE'
 const { spawnSync } = require("node:child_process");
-const { lstatSync, readFileSync } = require("node:fs");
-const { join, resolve } = require("node:path");
+const { existsSync, lstatSync, readdirSync, readFileSync } = require("node:fs");
+const { isAbsolute, join, resolve, relative, sep } = require("node:path");
 
 const runtimeEnv = process["env"];
 const home = runtimeEnv.PPM_PROFILE_HOME;
@@ -459,13 +459,59 @@ function piAgentKitEnabled(profile, agentDir) {
   return Boolean(manifest && manifest.version === 1 && manifest.kit === "engineer" && Array.isArray(manifest.files));
 }
 
-function ompAgentKitEnabled() {
+function hasAkSkills(root) {
+  const skillsRoot = join(root, "skills");
+  try {
+    return readdirSync(skillsRoot, { withFileTypes: true }).some((entry) =>
+      entry.isDirectory() && entry.name.startsWith("ak-") && existsSync(join(skillsRoot, entry.name, "SKILL.md")),
+    );
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isUnderRoot(path, root) {
+  const rel = relative(resolve(root), resolve(path));
+  return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+function collectStrings(value, output = []) {
+  if (typeof value === "string") output.push(value);
+  else if (Array.isArray(value)) value.forEach((entry) => collectStrings(entry, output));
+  else if (value && typeof value === "object") Object.values(value).forEach((entry) => collectStrings(entry, output));
+  return output;
+}
+
+function hasWrongOmpClaims(value, root) {
+  if (!value) return false;
+  for (const text of collectStrings(value)) {
+    const normalized = text.replaceAll("\\\\", "/");
+    const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+    if (!pathClaim) continue;
+    if (!isUnderRoot(text, root)) return true;
+  }
+  return false;
+}
+
+function ompClaimsStayInProfile(root) {
   const ownership = readJsonObject(
     join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"),
     "pi-omp",
     "ownership",
   );
-  return Boolean(ownership && ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+  const nativePaths = readJsonObject(
+    join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"),
+    "pi-omp",
+    "native skill paths",
+  );
+  if (hasWrongOmpClaims(ownership, root) || hasWrongOmpClaims(nativePaths, root)) return false;
+  return !ownership || (ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+}
+
+function ompAgentKitEnabled() {
+  const root = ompRoot();
+  return hasAkSkills(root) && ompClaimsStayInProfile(root);
 }
 
 function piProfile(profile) {
@@ -576,6 +622,82 @@ install_pi_extensions() {
   done
 }
 
+omp_agentkit_check() {
+  local root
+  root="$(omp_root)"
+  PPM_PROFILE_HOME="$HOME" node <<'NODE'
+const { existsSync, lstatSync, readdirSync, readFileSync } = require("node:fs");
+const { isAbsolute, join, relative, resolve, sep } = require("node:path");
+
+const home = process.env.PPM_PROFILE_HOME;
+const root = join(home, ".omp", "profiles", "pi-omp", "agent");
+const defaultRoot = join(home, ".omp", "agent");
+const skillsRoot = join(root, "skills");
+
+function fail(message) {
+  process.stderr.write(`ERROR: ${message}\n`);
+  process.exit(1);
+}
+function isUnder(path, expectedRoot) {
+  const rel = relative(resolve(expectedRoot), resolve(path));
+  return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+function readJson(path) {
+  try {
+    if (!lstatSync(path).isFile()) return null;
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    fail(`pi-omp AgentKit evidence is unreadable: ${path}`);
+  }
+}
+function collectStrings(value, output = []) {
+  if (typeof value === "string") output.push(value);
+  else if (Array.isArray(value)) value.forEach((entry) => collectStrings(entry, output));
+  else if (value && typeof value === "object") Object.values(value).forEach((entry) => collectStrings(entry, output));
+  return output;
+}
+function firstWrongClaim(value) {
+  if (!value) return null;
+  for (const text of collectStrings(value)) {
+    const normalized = text.replaceAll("\\\\", "/");
+    const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+    if (!pathClaim || isUnder(text, root)) continue;
+    return text;
+  }
+  return null;
+}
+function firstAkSkill() {
+  try {
+    for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
+      const skill = join(skillsRoot, entry.name, "SKILL.md");
+      if (entry.isDirectory() && entry.name.startsWith("ak-") && existsSync(skill)) return skill;
+    }
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  return null;
+}
+const ownershipPath = join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json");
+const nativePathsPath = join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json");
+const wrongClaim = firstWrongClaim(readJson(ownershipPath)) || firstWrongClaim(readJson(nativePathsPath));
+const skill = firstAkSkill();
+if (wrongClaim || !skill) {
+  const defaultSkills = join(defaultRoot, "skills");
+  const found = skill || (existsSync(defaultSkills) ? defaultSkills : "none");
+  fail([
+    "pi-omp AgentKit skills were not installed into the named OMP profile.",
+    `AGENTKIT_OMP_HOME=${root}`,
+    `actual skills root found=${found}`,
+    `wrong default destination=${defaultSkills}`,
+    wrongClaim ? `out-of-profile claim=${wrongClaim}` : null,
+    "repair: re-run pi-profile-manager install pi-omp",
+  ].filter(Boolean).join(" "));
+}
+process.stdout.write(`${skill}\n`);
+NODE
+}
+
 install_agentkit() {
   local profile="$1"
   local target="$2"
@@ -592,6 +714,16 @@ install_agentkit() {
     --channel beta \
     --yes \
     --no-interactive
+  if [[ "$target" == "omp" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "would assert AgentKit skills under: $(omp_root)/skills/ak-*/SKILL.md"
+      info "would reject default OMP AgentKit destination: $HOME/.omp/agent/skills"
+    else
+      local found_skill
+      found_skill="$(omp_agentkit_check)"
+      info "pi-omp AgentKit skill verified: $found_skill"
+    fi
+  fi
 }
 
 preflight_install() {
@@ -789,8 +921,7 @@ verify_omp_profile() {
   runtime_root="$("$wrapper" config path)"
   [[ "$runtime_root" == "$root" ]] \
     || fail "pi-omp config path '$runtime_root'; expected '$root'"
-  [[ -f "$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json" ]] \
-    || fail "pi-omp missing AgentKit ownership index"
+  omp_agentkit_check >/dev/null
   info "pi-omp verification passed"
 }
 
