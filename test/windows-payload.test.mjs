@@ -318,6 +318,11 @@ test("Windows install all creates isolated configs and wrappers", () => {
     assert.ok(existsSync(wrapper), wrapper);
     assert.match(readFileSync(wrapper, "utf8"), new RegExp(`mise -E ${profile} exec --`));
   }
+  const piAkWrapper = readFileSync(join(fx.home, "bin", "pi-ak.cmd"), "utf8");
+  assert.match(piAkWrapper, /if "%__ppm_cmd%"=="install" goto ppm_passthrough/);
+  assert.match(piAkWrapper, /--no-skills/);
+  assert.match(piAkWrapper, /'--skill', profileSkills/);
+  assert.match(piAkWrapper, /'--skill', join\(projectPi, 'skills'\)/);
   assert.match(
     readFileSync(join(fx.home, ".config", "mise", "config.pi-dev.toml"), "utf8"),
     /PI_CODING_AGENT_DIR/,

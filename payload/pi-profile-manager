@@ -7,6 +7,7 @@ OMP_TOOL="github:can1357/oh-my-pi"
 MISE_INSTALLER_URL="https://mise.run"
 DRY_RUN=0
 REQUESTED_VERSION="latest"
+MANAGED_MARKER="managed by pi-profile-manager"
 
 PI_EXTENSIONS=(
   "npm:statusline-pi@1.2.1"
@@ -190,6 +191,28 @@ write_managed_file() {
   info "wrote: $path"
 }
 
+legacy_wrapper_content() {
+  local profile="$1"
+  local executable="$2"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    "exec mise -E ${profile} exec -- ${executable} \"\$@\""
+}
+
+assert_managed_wrapper_writable() {
+  local path="$1"
+  local profile="$2"
+  local executable="$3"
+  local content=""
+  [[ -e "$path" ]] || return 0
+  [[ -f "$path" ]] || fail "managed target is not a regular file: $path"
+  content="$(<"$path")"
+  [[ "$content" == "$(wrapper_content "$profile" "$executable")" ]] && return
+  [[ "$content" == "$(legacy_wrapper_content "$profile" "$executable")" ]] && return
+  [[ "$content" == "#!/bin/sh"$'\n'"# $MANAGED_MARKER"$'\n'* ]] && return
+  fail "refusing to overwrite user-owned wrapper without managed marker: $path"
+}
+
 pi_root() {
   printf '%s/.pi/profiles/%s' "$HOME" "$1"
 }
@@ -221,9 +244,37 @@ omp_config_content() {
 wrapper_content() {
   local profile="$1"
   local executable="$2"
-  printf '%s\n' \
-    '#!/bin/sh' \
-    "exec mise -E ${profile} exec -- ${executable} \"\$@\""
+  if [[ "$executable" != "pi" ]]; then
+    legacy_wrapper_content "$profile" "$executable"
+    return
+  fi
+  cat <<EOF
+#!/bin/sh
+# $MANAGED_MARKER
+case "\${1:-}" in
+  install|remove|uninstall|update|list|config|auth)
+    exec mise -E ${profile} exec -- pi "\$@"
+    ;;
+esac
+exec mise -E ${profile} exec -- sh -c '
+profile_skills="\${PI_CODING_AGENT_DIR%/}/skills"
+project_pi="\$PWD/.pi"
+has_profile_skill=0
+for skill in "\$profile_skills"/*/SKILL.md; do
+  if [ -f "\$skill" ]; then
+    has_profile_skill=1
+    break
+  fi
+done
+if [ -d "\$project_pi" ] || [ "\$has_profile_skill" = 1 ]; then
+  if [ -d "\$project_pi/skills" ]; then
+    exec pi --no-skills --skill "\$profile_skills" --skill "\$project_pi/skills" "\$@"
+  fi
+  exec pi --no-skills --skill "\$profile_skills" "\$@"
+fi
+exec pi "\$@"
+' sh "\$@"
+EOF
 }
 
 ensure_pi_profile() {
@@ -233,7 +284,8 @@ ensure_pi_profile() {
   local wrapper_path="$HOME/.local/bin/${profile}"
   root="$(pi_root "$profile")"
 
-  run_command mkdir -p "$root/sessions" "$HOME/.config/mise" "$HOME/.local/bin"
+  assert_managed_wrapper_writable "$wrapper_path" "$profile" pi
+  run_command mkdir -p "$root/sessions" "$root/skills" "$HOME/.config/mise" "$HOME/.local/bin"
   write_managed_file "$config_path" "$(pi_config_content "$profile")"
   write_managed_file "$wrapper_path" "$(wrapper_content "$profile" pi)"
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -249,6 +301,7 @@ ensure_omp_profile() {
   local wrapper_path="$HOME/.local/bin/pi-omp"
   root="$(omp_root)"
 
+  assert_managed_wrapper_writable "$wrapper_path" pi-omp omp
   run_command mkdir -p "$root" "$HOME/.config/mise" "$HOME/.local/bin"
   write_managed_file "$config_path" "$(omp_config_content)"
   write_managed_file "$wrapper_path" "$(wrapper_content pi-omp omp)"
@@ -381,9 +434,39 @@ function ompConfigContent() {
 }
 
 function wrapperContent(profile, executable) {
+  if (executable !== "pi") {
+    return [
+      "#!/bin/sh",
+      `exec mise -E ${profile} exec -- ${executable} "$@"`,
+      "",
+    ].join("\n");
+  }
   return [
     "#!/bin/sh",
-    `exec mise -E ${profile} exec -- ${executable} "$@"`,
+    "# managed by pi-profile-manager",
+    'case "${1:-}" in',
+    "  install|remove|uninstall|update|list|config|auth)",
+    `    exec mise -E ${profile} exec -- pi "$@"`,
+    "    ;;",
+    "esac",
+    `exec mise -E ${profile} exec -- sh -c '`,
+    'profile_skills="${PI_CODING_AGENT_DIR%/}/skills"',
+    'project_pi="$PWD/.pi"',
+    "has_profile_skill=0",
+    'for skill in "$profile_skills"/*/SKILL.md; do',
+    '  if [ -f "$skill" ]; then',
+    "    has_profile_skill=1",
+    "    break",
+    "  fi",
+    "done",
+    'if [ -d "$project_pi" ] || [ "$has_profile_skill" = 1 ]; then',
+    '  if [ -d "$project_pi/skills" ]; then',
+    '    exec pi --no-skills --skill "$profile_skills" --skill "$project_pi/skills" "$@"',
+    "  fi",
+    '  exec pi --no-skills --skill "$profile_skills" "$@"',
+    "fi",
+    'exec pi "$@"',
+    `' sh "$@"`,
     "",
   ].join("\n");
 }

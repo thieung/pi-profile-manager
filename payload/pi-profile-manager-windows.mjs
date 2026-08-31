@@ -426,8 +426,54 @@ export function createWindowsProfileManager(options = {}) {
     ].join("\n");
   }
 
+  function piSessionRouterScript() {
+    return [
+      "const { spawnSync } = require('node:child_process');",
+      "const { existsSync, readdirSync } = require('node:fs');",
+      "const { join } = require('node:path');",
+      "const marker = process.argv.indexOf('--');",
+      "const args = marker >= 0 ? process.argv.slice(marker + 1) : process.argv.slice(1);",
+      "const root = process.env.PI_CODING_AGENT_DIR || '';",
+      "const profileSkills = join(root, 'skills');",
+      "const projectPi = join(process.cwd(), '.pi');",
+      "let hasProfileSkill = false;",
+      "try {",
+      "  hasProfileSkill = readdirSync(profileSkills, { withFileTypes: true }).some((entry) => entry.isDirectory() && existsSync(join(profileSkills, entry.name, 'SKILL.md')));",
+      "} catch (error) {",
+      "  if (!error || error.code !== 'ENOENT') throw error;",
+      "}",
+      "const finalArgs = (existsSync(projectPi) || hasProfileSkill)",
+      "  ? ['--no-skills', '--skill', profileSkills, ...(existsSync(join(projectPi, 'skills')) ? ['--skill', join(projectPi, 'skills')] : []), ...args]",
+      "  : args;",
+      "const result = spawnSync('pi', finalArgs, { stdio: 'inherit', shell: false });",
+      "if (result.error) { console.error(result.error.message); process.exit(1); }",
+      "process.exit(result.status ?? 1);",
+    ].join(" ");
+  }
+
   function wrapper(profile, executable) {
-    return `@echo off\r\n@rem ${MANAGED_MARKER}\r\nmise -E ${profile} exec -- ${executable} %*\r\nexit /b %ERRORLEVEL%\r\n`;
+    if (executable !== "pi") {
+      return `@echo off\r\n@rem ${MANAGED_MARKER}\r\nmise -E ${profile} exec -- ${executable} %*\r\nexit /b %ERRORLEVEL%\r\n`;
+    }
+    const router = quoteCmdArgument(piSessionRouterScript());
+    return [
+      "@echo off",
+      `@rem ${MANAGED_MARKER}`,
+      "set __ppm_cmd=%~1",
+      "if \"%__ppm_cmd%\"==\"install\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"remove\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"uninstall\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"update\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"list\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"config\" goto ppm_passthrough",
+      "if \"%__ppm_cmd%\"==\"auth\" goto ppm_passthrough",
+      `mise -E ${profile} exec -- node -e ${router} -- %*`,
+      "exit /b %ERRORLEVEL%",
+      ":ppm_passthrough",
+      `mise -E ${profile} exec -- pi %*`,
+      "exit /b %ERRORLEVEL%",
+      "",
+    ].join("\r\n");
   }
 
   function matchesManagedContent(actual, canonical) {

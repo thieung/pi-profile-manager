@@ -10,7 +10,9 @@ pi-ak   = upstream Pi + selected extensions + AgentKit
 pi-omp  = Oh My Pi + AgentKit
 ```
 
-Each profile gets its own runtime configuration, skills, extensions, and sessions. Profile isolation does not provide a process sandbox or isolate repositories, credentials, ports, containers, or other OS-level resources.
+Each profile gets its own runtime configuration, skills, extensions, and sessions. The `pi-dev`/`pi-ak` CLI wrappers isolate Pi skill discovery for interactive sessions when profile skills or `$PWD/.pi` exists: they disable Pi auto-discovery and load profile skills first, then `$PWD/.pi/skills` when present. If neither profile skills nor project `.pi` exists, the wrapper falls back to plain Pi discovery. Pi lifecycle commands (`install`, `remove`, `uninstall`, `update`, `list`, `config`, `auth`) always pass through unchanged. Embedded hosts that do not execute the wrapper, including Orca sessions, are not covered by this CLI isolation.
+
+Profile isolation does not provide a process sandbox or isolate repositories, credentials, ports, containers, or other OS-level resources.
 
 ## Requirements
 

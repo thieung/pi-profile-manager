@@ -10,7 +10,9 @@ pi-ak   = Pi upstream + selected extensions + AgentKit
 pi-omp  = Oh My Pi + AgentKit
 ```
 
-Mỗi profile có runtime config, skills, extensions và sessions riêng. Profile isolation không phải process sandbox và không tách repositories, credentials, ports, containers hay các tài nguyên khác ở tầng OS.
+Mỗi profile có runtime config, skills, extensions và sessions riêng. CLI wrapper `pi-dev`/`pi-ak` cô lập skill discovery của Pi cho interactive session khi có profile skills hoặc `$PWD/.pi`: tắt auto-discovery của Pi, load profile skills trước, rồi `$PWD/.pi/skills` nếu có. Nếu không có profile skills và cũng không có project `.pi`, wrapper fallback về discovery mặc định của Pi. Các lifecycle command của Pi (`install`, `remove`, `uninstall`, `update`, `list`, `config`, `auth`) luôn pass-through nguyên trạng. Host nhúng không chạy qua wrapper, gồm Orca session, không được cover bởi isolation này.
+
+Profile isolation không phải process sandbox và không tách repositories, credentials, ports, containers hay các tài nguyên khác ở tầng OS.
 
 ## Điều Kiện
 
