@@ -38,9 +38,10 @@ Usage:
 After install:
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
+  pi-profile-manager add [name] [--auth <broker|local>] [--broker-url <url>] [--broker-token <token>] [--with-agentkit|--no-agentkit] [--dry-run]
   pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
   pi-profile-manager profiles list --json
-  pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
+  pi-profile-manager verify [pi-dev|pi-ak|pi-omp|<custom>|all]
 `);
 }
 

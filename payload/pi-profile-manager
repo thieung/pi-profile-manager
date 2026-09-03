@@ -23,13 +23,15 @@ Usage:
   pi-profile-manager bootstrap [--dry-run]
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
+  pi-profile-manager add [name] [--auth <broker|local>] [--broker-url <url>] [--broker-token <token>] [--with-agentkit|--no-agentkit] [--dry-run]
   pi-profile-manager update <pi|omp|all> [--version <exact>] [--dry-run]
   pi-profile-manager profiles list --json
-  pi-profile-manager verify [pi-dev|pi-ak|pi-omp|all]
+  pi-profile-manager verify [pi-dev|pi-ak|pi-omp|<custom>|all]
 
 The script never reads or writes provider credentials. AgentKit is invoked only
-for pi-ak and pi-omp. Bootstrap installs only Mise; Node.js/npm and AgentKit stay
-explicit prerequisites. Use --dry-run to preview filesystem and command mutations.
+for pi-ak, pi-omp, or profiles configured with AgentKit. Bootstrap installs only Mise;
+Node.js/npm and AgentKit stay explicit prerequisites. Use --dry-run to preview
+filesystem and command mutations.
 USAGE
 }
 
@@ -204,13 +206,61 @@ assert_managed_wrapper_writable() {
   local profile="$2"
   local executable="$3"
   local content=""
-  [[ -e "$path" ]] || return 0
-  [[ -f "$path" ]] || fail "managed target is not a regular file: $path"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  [[ ! -L "$path" && -f "$path" ]] || fail "managed target is not a regular file: $path"
   content="$(<"$path")"
   [[ "$content" == "$(wrapper_content "$profile" "$executable")" ]] && return
   [[ "$content" == "$(legacy_wrapper_content "$profile" "$executable")" ]] && return
   [[ "$content" == "#!/bin/sh"$'\n'"# $MANAGED_MARKER"$'\n'* ]] && return
   fail "refusing to overwrite user-owned wrapper without managed marker: $path"
+}
+assert_managed_config_writable() {
+  local path="$1"
+  local profile="$2"
+  local content=""
+  local first_line=""
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  [[ ! -L "$path" && -f "$path" ]] || fail "managed target is not a regular file: $path"
+  content="$(<"$path")"
+  [[ "$content" == "$(omp_config_content "$profile")" ]] && return
+  IFS= read -r first_line <<<"$content" || true
+  [[ "$first_line" == "# $MANAGED_MARKER" ]] && return
+  fail "refusing to overwrite user-owned config without managed marker: $path"
+}
+
+assert_managed_marker_file_writable() {
+  local path="$1"
+  local first_line=""
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  [[ ! -L "$path" && -f "$path" ]] || fail "managed target is not a regular file: $path"
+  IFS= read -r first_line <"$path" || true
+  [[ "$first_line" == "# $MANAGED_MARKER" ]] && return
+  fail "refusing to overwrite user-owned file without managed marker: $path"
+}
+
+assert_target_writable() {
+  local path="$1"
+  local dir=""
+  local parent=""
+  if [[ -L "$path" ]]; then
+    fail "managed target is not a regular file: $path"
+  fi
+  if [[ -e "$path" ]]; then
+    [[ -f "$path" && -w "$path" ]] || fail "managed target is not writable: $path"
+  fi
+  dir="$(dirname "$path")"
+  while [[ ! -e "$dir" ]]; do
+    parent="$(dirname "$dir")"
+    [[ "$parent" == "$dir" ]] && break
+    dir="$parent"
+  done
+  [[ ! -L "$dir" && -d "$dir" && -w "$dir" && -x "$dir" ]] || fail "managed destination is not writable: $dir"
 }
 
 pi_root() {
@@ -218,7 +268,8 @@ pi_root() {
 }
 
 omp_root() {
-  printf '%s/.omp/profiles/pi-omp/agent' "$HOME"
+  local profile="${1:-pi-omp}"
+  printf '%s/.omp/profiles/%s/agent' "$HOME" "$profile"
 }
 
 pi_config_content() {
@@ -232,13 +283,78 @@ pi_config_content() {
 }
 
 omp_config_content() {
+  local profile="${1:-pi-omp}"
   printf '%s\n' \
     '[env]' \
-    'OMP_PROFILE = "pi-omp"' \
-    'AGENTKIT_OMP_HOME = "{{ env.HOME }}/.omp/profiles/pi-omp/agent"' \
+    "OMP_PROFILE = \"${profile}\"" \
+    "AGENTKIT_OMP_HOME = \"{{ env.HOME }}/.omp/profiles/${profile}/agent\"" \
     'PI_PROFILE = false' \
     'PI_CODING_AGENT_DIR = false' \
     'PI_CODING_AGENT_SESSION_DIR = false'
+}
+
+validate_env_value() {
+  local label="$1"
+  local value="$2"
+  [[ "$value" != *$'\r'* && "$value" != *$'\n'* ]] \
+    || fail "$label cannot contain newline or carriage return"
+}
+
+broker_env_content() {
+  local url="$1"
+  local token="$2"
+  printf '%s\n' \
+    "# $MANAGED_MARKER" \
+    "OMP_AUTH_BROKER_URL=$url" \
+    "OMP_AUTH_BROKER_TOKEN=$token"
+}
+
+write_broker_env() {
+  local profile="$1"
+  local url="$2"
+  local token="$3"
+  local root
+  local env_path
+  local tmp_path
+  local first_line=""
+
+  validate_env_value "OMP_AUTH_BROKER_URL" "$url"
+  validate_env_value "OMP_AUTH_BROKER_TOKEN" "$token"
+
+  root="$(omp_root "$profile")"
+  env_path="$root/.env"
+
+  if [[ -e "$env_path" || -L "$env_path" ]]; then
+    [[ ! -L "$env_path" && -f "$env_path" ]] || fail "managed target is not a regular file: $env_path"
+    IFS= read -r first_line <"$env_path" || true
+    if [[ "$first_line" != "# $MANAGED_MARKER" ]]; then
+      fail "refusing to overwrite user-owned file without managed marker: $env_path"
+    fi
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would write: $env_path (mode 0600, token redacted)"
+    return
+  fi
+
+  mkdir -p "$root"
+  tmp_path="$( (umask 077 && mktemp "${env_path}.tmp.XXXXXX") )" \
+    || fail "failed to create temporary secret file"
+
+  if ! (
+    umask 077
+    broker_env_content "$url" "$token" >"$tmp_path"
+  ); then
+    rm -f "$tmp_path"
+    fail "failed to write temporary secret file"
+  fi
+
+  chmod 0600 "$tmp_path" 2>/dev/null || true
+  if ! mv -f "$tmp_path" "$env_path"; then
+    rm -f "$tmp_path"
+    fail "failed to replace $env_path"
+  fi
+  info "wrote: $env_path"
 }
 
 wrapper_content() {
@@ -296,15 +412,17 @@ ensure_pi_profile() {
 }
 
 ensure_omp_profile() {
+  local profile="${1:-pi-omp}"
   local root
-  local config_path="$HOME/.config/mise/config.pi-omp.toml"
-  local wrapper_path="$HOME/.local/bin/pi-omp"
-  root="$(omp_root)"
+  local config_path="$HOME/.config/mise/config.${profile}.toml"
+  local wrapper_path="$HOME/.local/bin/${profile}"
+  root="$(omp_root "$profile")"
 
-  assert_managed_wrapper_writable "$wrapper_path" pi-omp omp
+  assert_managed_config_writable "$config_path" "$profile"
+  assert_managed_wrapper_writable "$wrapper_path" "$profile" omp
   run_command mkdir -p "$root" "$HOME/.config/mise" "$HOME/.local/bin"
-  write_managed_file "$config_path" "$(omp_config_content)"
-  write_managed_file "$wrapper_path" "$(wrapper_content pi-omp omp)"
+  write_managed_file "$config_path" "$(omp_config_content "$profile")"
+  write_managed_file "$wrapper_path" "$(wrapper_content "$profile" omp)"
   if [[ "$DRY_RUN" -eq 0 ]]; then
     chmod 0755 "$wrapper_path"
   else
@@ -334,27 +452,28 @@ assert_pi_profile_root() {
 }
 
 assert_omp_profile_root() {
+  local profile="${1:-pi-omp}"
   local expected
   local values
   local actual_root
   local pi_value
-  expected="$(omp_root)"
+  expected="$(omp_root "$profile")"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "would assert pi-omp root: $expected"
+    info "would assert $profile root: $expected"
     return
   fi
 
   # Expansion is intentionally deferred to the profile-scoped child shell.
   # shellcheck disable=SC2016
-  values="$(mise -E pi-omp exec -- sh -c 'printf "%s\n%s" "$AGENTKIT_OMP_HOME" "${PI_CODING_AGENT_DIR-unset}"')"
+  values="$(mise -E "$profile" exec -- sh -c 'printf "%s\n%s" "$AGENTKIT_OMP_HOME" "${PI_CODING_AGENT_DIR-unset}"')"
   actual_root="${values%%$'\n'*}"
   pi_value="${values#*$'\n'}"
   [[ "$actual_root" == "$expected" ]] \
-    || fail "pi-omp resolved root '$actual_root'; expected '$expected'"
+    || fail "$profile resolved root '$actual_root'; expected '$expected'"
   [[ "$pi_value" == "unset" ]] \
-    || fail "pi-omp unexpectedly inherits PI_CODING_AGENT_DIR='$pi_value'"
-  info "pi-omp root verified: $actual_root"
+    || fail "$profile unexpectedly inherits PI_CODING_AGENT_DIR='$pi_value'"
+  info "$profile root verified: $actual_root"
 }
 
 profiles_list_json() {
@@ -406,8 +525,8 @@ function piRoot(profile) {
   return join(home, ".pi", "profiles", profile);
 }
 
-function ompRoot() {
-  return join(home, ".omp", "profiles", "pi-omp", "agent");
+function ompRoot(profile = "pi-omp") {
+  return join(home, ".omp", "profiles", profile, "agent");
 }
 
 function piConfigContent(profile) {
@@ -421,11 +540,11 @@ function piConfigContent(profile) {
   ].join("\n");
 }
 
-function ompConfigContent() {
+function ompConfigContent(profile = "pi-omp") {
   return [
     "[env]",
-    'OMP_PROFILE = "pi-omp"',
-    'AGENTKIT_OMP_HOME = "{{ env.HOME }}/.omp/profiles/pi-omp/agent"',
+    `OMP_PROFILE = "${profile}"`,
+    `AGENTKIT_OMP_HOME = "{{ env.HOME }}/.omp/profiles/${profile}/agent"`,
     "PI_PROFILE = false",
     "PI_CODING_AGENT_DIR = false",
     "PI_CODING_AGENT_SESSION_DIR = false",
@@ -497,13 +616,13 @@ function piRuntimeHealthy(profile, agentDir, sessionDir) {
     resolve(actualSessionDir || "") === resolve(sessionDir);
 }
 
-function ompRuntimeHealthy(agentDir) {
+function ompRuntimeHealthy(agentDir, profile = "pi-omp") {
   const envScript = 'printf "%s\\n%s" "$AGENTKIT_OMP_HOME" "${PI_CODING_AGENT_DIR-unset}"';
-  const output = capture("pi-omp", ["mise", "-E", "pi-omp", "exec", "--", "sh", "-c", envScript], "runtime environment");
+  const output = capture(profile, ["mise", "-E", profile, "exec", "--", "sh", "-c", envScript], "runtime environment");
   if (output === null) return false;
   const [actualAgentDir, piValue] = output.split("\n");
   if (resolve(actualAgentDir || "") !== resolve(agentDir) || piValue !== "unset") return false;
-  const runtimeRoot = capture("pi-omp", ["mise", "-E", "pi-omp", "exec", "--", "omp", "config", "path"], "config path");
+  const runtimeRoot = capture(profile, ["mise", "-E", profile, "exec", "--", "omp", "config", "path"], "config path");
   return runtimeRoot !== null && resolve(runtimeRoot) === resolve(agentDir);
 }
 
@@ -556,7 +675,7 @@ function hasAkSkills(root) {
 
 function isUnderRoot(path, root) {
   const rel = relative(resolve(root), resolve(path));
-  return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+  return rel === "" || (!isAbsolute(rel) && !rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
 function collectStrings(value, output = []) {
@@ -566,35 +685,61 @@ function collectStrings(value, output = []) {
   return output;
 }
 
-function hasWrongOmpClaims(value, root) {
+function isOmpPathClaim(text) {
+  const normalized = String(text).replaceAll("\\", "/");
+  return isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+}
+
+function hasWrongOmpClaims(value) {
   if (!value) return false;
+  const profilesRoot = join(home, ".omp", "profiles");
+  const defaultRoot = join(home, ".omp", "agent");
   for (const text of collectStrings(value)) {
-    const normalized = text.replaceAll("\\\\", "/");
-    const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
-    if (!pathClaim) continue;
-    if (!isUnderRoot(text, root)) return true;
+    if (!isOmpPathClaim(text)) continue;
+    if (isUnderRoot(text, defaultRoot) || !isUnderRoot(text, profilesRoot)) return true;
   }
   return false;
 }
 
-function ompClaimsStayInProfile(root) {
+function hasTargetProfileClaim(value, root) {
+  if (!value) return false;
+  for (const text of collectStrings(value)) {
+    if (isOmpPathClaim(text) && isUnderRoot(text, root)) return true;
+  }
+  return false;
+}
+
+function validOwnership(value) {
+  return Boolean(value && value.version === 1 && value.kit === "engineer" && Array.isArray(value.claims));
+}
+
+function validNativePaths(value) {
+  return Boolean(value && Array.isArray(value.skills));
+}
+
+function exactManagedFirstLine(content) {
+  return String(content).replaceAll("\r\n", "\n").split("\n")[0] === "# managed by pi-profile-manager";
+}
+
+function ompClaimsStayInProfile(root, profile = "pi-omp") {
   const ownership = readJsonObject(
     join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"),
-    "pi-omp",
+    profile,
     "ownership",
   );
   const nativePaths = readJsonObject(
     join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"),
-    "pi-omp",
+    profile,
     "native skill paths",
   );
-  if (hasWrongOmpClaims(ownership, root) || hasWrongOmpClaims(nativePaths, root)) return false;
-  return !ownership || (ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+  if (!validOwnership(ownership) || !validNativePaths(nativePaths)) return false;
+  if (hasWrongOmpClaims(ownership) || hasWrongOmpClaims(nativePaths)) return false;
+  return hasTargetProfileClaim(ownership.claims, root) && hasTargetProfileClaim(nativePaths.skills, root);
 }
 
-function ompAgentKitEnabled() {
-  const root = ompRoot();
-  return hasAkSkills(root) && ompClaimsStayInProfile(root);
+function ompAgentKitEnabled(profile = "pi-omp") {
+  const root = ompRoot(profile);
+  return hasAkSkills(root) && ompClaimsStayInProfile(root, profile);
 }
 
 function piProfile(profile) {
@@ -623,30 +768,73 @@ function piProfile(profile) {
   };
 }
 
-function ompProfile() {
-  const agentDir = ompRoot();
-  const configPath = join(home, ".config", "mise", "config.pi-omp.toml");
-  const wrapperPath = join(home, ".local", "bin", "pi-omp");
+function ompProfile(profile = "pi-omp") {
+  const agentDir = ompRoot(profile);
+  const configPath = join(home, ".config", "mise", `config.${profile}.toml`);
+  const wrapperPath = join(home, ".local", "bin", profile);
   const config = readRegular(configPath);
   const wrapper = readRegular(wrapperPath);
   if (!config.exists && !wrapper.exists) return null;
+  const markerFile = join(agentDir, ".manager-profile");
+  let markerOk = profile === "pi-omp";
+  if (!markerOk) {
+    try {
+      const marker = readRegular(markerFile);
+      markerOk = marker.exists && marker.regular && exactManagedFirstLine(marker.content);
+    } catch {
+      markerOk = false;
+    }
+  }
   const managed = config.regular && wrapper.regular &&
-    matchesManagedContent(config.content, ompConfigContent()) &&
-    matchesManagedContent(wrapper.content, wrapperContent("pi-omp", "omp"));
-  if (!managed) warn("pi-omp managed evidence is incomplete or drifted");
-  const runtimeHealthy = managed && ompRuntimeHealthy(agentDir);
+    matchesManagedContent(config.content, ompConfigContent(profile)) &&
+    matchesManagedContent(wrapper.content, wrapperContent(profile, "omp")) && markerOk;
+  if (!managed) warn(`${profile} managed evidence is incomplete or drifted`);
+  const runtimeHealthy = managed && ompRuntimeHealthy(agentDir, profile);
   return {
-    id: "pi-omp",
+    id: profile,
     runtime: "omp",
     agentDir: resolve(agentDir),
     sessionDir: null,
-    agentkitEnabled: ompAgentKitEnabled(),
+    agentkitEnabled: ompAgentKitEnabled(profile),
     managed,
     healthy: managed && isDirectory(agentDir) && isExecutableFile(wrapperPath) && runtimeHealthy,
   };
 }
-
-const profiles = [piProfile("pi-dev"), piProfile("pi-ak"), ompProfile()].filter(Boolean);
+const miseConfigDir = join(home, ".config", "mise");
+const defaultProfiles = ["pi-dev", "pi-ak", "pi-omp"];
+const discovered = new Set(defaultProfiles);
+const ompProfilesDir = join(home, ".omp", "profiles");
+if (isDirectory(ompProfilesDir)) {
+  let entries = [];
+  try {
+    entries = readdirSync(ompProfilesDir, { withFileTypes: true });
+  } catch {}
+  for (const entry of entries) {
+    try {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      if (defaultProfiles.includes(id)) continue;
+      const markerPath = join(ompProfilesDir, id, "agent", ".manager-profile");
+      const marker = readRegular(markerPath);
+      if (marker.exists && marker.regular && exactManagedFirstLine(marker.content)) {
+        discovered.add(id);
+      }
+    } catch {}
+  }
+}
+const profilesList = [];
+const orderedProfiles = [
+  ...defaultProfiles,
+  ...Array.from(discovered).filter((id) => !defaultProfiles.includes(id)).sort(),
+];
+for (const id of orderedProfiles) {
+  if (id === "pi-dev" || id === "pi-ak") {
+    profilesList.push(piProfile(id));
+  } else {
+    profilesList.push(ompProfile(id));
+  }
+}
+const profiles = profilesList.filter(Boolean);
 process.stdout.write(`${JSON.stringify({ schemaVersion, profiles })}\n`);
 NODE
 }
@@ -677,6 +865,7 @@ resolve_omp_version() {
 
 install_omp_binary() {
   local version="$1"
+  local profile="${2:-pi-omp}"
   local resolved
   require_command mise
   validate_version "$version"
@@ -690,8 +879,10 @@ install_omp_binary() {
   run_command env MISE_LOCKED=0 mise use -g --pin "${OMP_TOOL}@${resolved}"
   run_command mise lock -g "$OMP_TOOL"
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    require_command omp
-    info "OMP installed: $(omp --version)"
+    local omp_version
+    omp_version="$(mise -E "$profile" exec -- omp --version)" \
+      || fail "failed to verify installed OMP in $profile: omp --version failed"
+    info "OMP installed: $omp_version"
   fi
 }
 
@@ -706,14 +897,16 @@ install_pi_extensions() {
 }
 
 omp_agentkit_check() {
+  local profile="${1:-pi-omp}"
   local root
-  root="$(omp_root)"
-  PPM_PROFILE_HOME="$HOME" node <<'NODE'
+  root="$(omp_root "$profile")"
+  PPM_TARGET_PROFILE="$profile" PPM_PROFILE_HOME="$HOME" node <<'NODE'
 const { existsSync, lstatSync, readdirSync, readFileSync } = require("node:fs");
 const { isAbsolute, join, relative, resolve, sep } = require("node:path");
 
 const home = process.env.PPM_PROFILE_HOME;
-const root = join(home, ".omp", "profiles", "pi-omp", "agent");
+const profile = process.env.PPM_TARGET_PROFILE || "pi-omp";
+const root = join(home, ".omp", "profiles", profile, "agent");
 const defaultRoot = join(home, ".omp", "agent");
 const skillsRoot = join(root, "skills");
 
@@ -723,7 +916,7 @@ function fail(message) {
 }
 function isUnder(path, expectedRoot) {
   const rel = relative(resolve(expectedRoot), resolve(path));
-  return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+  return rel === "" || (!isAbsolute(rel) && !rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 function readJson(path) {
   try {
@@ -731,7 +924,7 @@ function readJson(path) {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     if (error && error.code === "ENOENT") return null;
-    fail(`pi-omp AgentKit evidence is unreadable: ${path}`);
+    fail(`${profile} AgentKit evidence is unreadable: ${path}`);
   }
 }
 function collectStrings(value, output = []) {
@@ -740,15 +933,31 @@ function collectStrings(value, output = []) {
   else if (value && typeof value === "object") Object.values(value).forEach((entry) => collectStrings(entry, output));
   return output;
 }
+function isOmpPathClaim(text) {
+  const normalized = String(text).replaceAll("\\", "/");
+  return isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+}
 function firstWrongClaim(value) {
   if (!value) return null;
+  const profilesRoot = join(home, ".omp", "profiles");
   for (const text of collectStrings(value)) {
-    const normalized = text.replaceAll("\\\\", "/");
-    const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
-    if (!pathClaim || isUnder(text, root)) continue;
-    return text;
+    if (!isOmpPathClaim(text)) continue;
+    if (isUnder(text, defaultRoot) || !isUnder(text, profilesRoot)) return text;
   }
   return null;
+}
+function hasTargetClaim(value) {
+  if (!value) return false;
+  for (const text of collectStrings(value)) {
+    if (isOmpPathClaim(text) && isUnder(text, root)) return true;
+  }
+  return false;
+}
+function validOwnership(value) {
+  return Boolean(value && value.version === 1 && value.kit === "engineer" && Array.isArray(value.claims));
+}
+function validNativePaths(value) {
+  return Boolean(value && Array.isArray(value.skills));
 }
 function firstAkSkill() {
   try {
@@ -763,18 +972,24 @@ function firstAkSkill() {
 }
 const ownershipPath = join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json");
 const nativePathsPath = join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json");
-const wrongClaim = firstWrongClaim(readJson(ownershipPath)) || firstWrongClaim(readJson(nativePathsPath));
+const ownership = readJson(ownershipPath);
+const nativePaths = readJson(nativePathsPath);
+const wrongClaim = firstWrongClaim(ownership) || firstWrongClaim(nativePaths);
 const skill = firstAkSkill();
-if (wrongClaim || !skill) {
+const missingTarget = !hasTargetClaim(ownership && ownership.claims) || !hasTargetClaim(nativePaths && nativePaths.skills);
+if (wrongClaim || !skill || !validOwnership(ownership) || !validNativePaths(nativePaths) || missingTarget) {
   const defaultSkills = join(defaultRoot, "skills");
   const found = skill || (existsSync(defaultSkills) ? defaultSkills : "none");
   fail([
-    "pi-omp AgentKit skills were not installed into the named OMP profile.",
+    `${profile} AgentKit skills were not installed into the named OMP profile.`,
     `AGENTKIT_OMP_HOME=${root}`,
     `actual skills root found=${found}`,
     `wrong default destination=${defaultSkills}`,
     wrongClaim ? `out-of-profile claim=${wrongClaim}` : null,
-    "repair: re-run pi-profile-manager install pi-omp",
+    !validOwnership(ownership) ? (ownership ? "malformed AgentKit ownership metadata" : "missing AgentKit ownership metadata") : null,
+    !validNativePaths(nativePaths) ? (nativePaths ? "malformed AgentKit native skill paths" : "missing AgentKit native skill paths") : null,
+    !wrongClaim && missingTarget ? "missing in-profile AgentKit claim" : null,
+    `repair: re-run pi-profile-manager install ${profile}`,
   ].filter(Boolean).join(" "));
 }
 process.stdout.write(`${skill}\n`);
@@ -788,7 +1003,7 @@ install_agentkit() {
   if [[ "$target" == "pi" ]]; then
     assert_pi_profile_root "$profile"
   else
-    assert_omp_profile_root
+    assert_omp_profile_root "$profile"
   fi
   run_command mise -E "$profile" exec -- \
     ak kit init engineer \
@@ -799,12 +1014,12 @@ install_agentkit() {
     --no-interactive
   if [[ "$target" == "omp" ]]; then
     if [[ "$DRY_RUN" -eq 1 ]]; then
-      info "would assert AgentKit skills under: $(omp_root)/skills/ak-*/SKILL.md"
+      info "would assert AgentKit skills under: $(omp_root "$profile")/skills/ak-*/SKILL.md"
       info "would reject default OMP AgentKit destination: $HOME/.omp/agent/skills"
     else
       local found_skill
-      found_skill="$(omp_agentkit_check)"
-      info "pi-omp AgentKit skill verified: $found_skill"
+      found_skill="$(omp_agentkit_check "$profile")"
+      info "$profile AgentKit skill verified: $found_skill"
     fi
   fi
 }
@@ -994,20 +1209,24 @@ verify_pi_profile() {
 }
 
 verify_omp_profile() {
+  local profile="${1:-pi-omp}"
   local root
-  local wrapper="$HOME/.local/bin/pi-omp"
+  local wrapper="$HOME/.local/bin/$profile"
   local runtime_root
-  root="$(omp_root)"
+  root="$(omp_root "$profile")"
 
   [[ -x "$wrapper" ]] || fail "missing executable wrapper: $wrapper"
-  assert_omp_profile_root
+  assert_omp_profile_root "$profile"
   runtime_root="$("$wrapper" config path)"
   [[ "$runtime_root" == "$root" ]] \
-    || fail "pi-omp config path '$runtime_root'; expected '$root'"
-  omp_agentkit_check >/dev/null
-  info "pi-omp verification passed"
+    || fail "$profile config path '$runtime_root'; expected '$root'"
+  if [[ "$profile" == "pi-omp" || -f "$root/.agentkit-profile" ]]; then
+    omp_agentkit_check "$profile" >/dev/null
+  elif [[ -d "$root/skills" ]] && compgen -G "$root/skills/ak-*/SKILL.md" >/dev/null 2>&1; then
+    omp_agentkit_check "$profile" >/dev/null
+  fi
+  info "$profile verification passed"
 }
-
 verify_target() {
   local target="$1"
   require_command mise
@@ -1019,17 +1238,270 @@ verify_target() {
       verify_pi_profile pi-ak
       ;;
     pi-omp)
-      verify_omp_profile
+      verify_omp_profile pi-omp
       ;;
     all)
       verify_pi_profile pi-dev
       verify_pi_profile pi-ak
-      verify_omp_profile
+      verify_omp_profile pi-omp
       ;;
     *)
-      fail "unknown verify target: $target"
+      validate_profile_name "$target"
+      local config_path="$HOME/.config/mise/config.${target}.toml"
+      local wrapper_path="$HOME/.local/bin/${target}"
+      if [[ -f "$config_path" || -x "$wrapper_path" ]]; then
+        if [[ -f "$config_path" ]] && grep -F -- "OMP_PROFILE = \"$target\"" "$config_path" >/dev/null 2>&1; then
+          verify_omp_profile "$target"
+        elif [[ -f "$config_path" ]] && grep -F -- "OMP_PROFILE =" "$config_path" >/dev/null 2>&1; then
+          verify_omp_profile "$target"
+        elif [[ -f "$config_path" ]] && grep -F -- 'PI_CODING_AGENT_DIR = "' "$config_path" >/dev/null 2>&1; then
+          verify_pi_profile "$target"
+        else
+          verify_omp_profile "$target"
+        fi
+      else
+        fail "unknown verify target: $target"
+      fi
+  esac
+}
+
+validate_profile_name() {
+  local name="$1"
+  local lower=""
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fail "invalid profile name: $name"
+  lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    all|pi|omp|doctor|update|install|verify|bootstrap|add|list|profiles|profile|help|pi-dev|pi-ak|pi-omp)
+      fail "reserved profile name: $name"
       ;;
   esac
+}
+
+cmd_add() {
+  local profile_name=""
+  local auth_type=""
+  local broker_url=""
+  local broker_token=""
+  local with_agentkit=""
+  local root=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --auth)
+        [[ "$#" -ge 2 ]] || fail "--auth requires a value (broker or local)"
+        auth_type="$2"
+        shift 2
+        ;;
+      --broker-url)
+        [[ "$#" -ge 2 ]] || fail "--broker-url requires a value"
+        broker_url="$2"
+        shift 2
+        ;;
+      --broker-token)
+        [[ "$#" -ge 2 ]] || fail "--broker-token requires a value"
+        broker_token="$2"
+        shift 2
+        ;;
+      --with-agentkit)
+        with_agentkit="1"
+        shift
+        ;;
+      --no-agentkit)
+        with_agentkit="0"
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        fail "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$profile_name" ]]; then
+          profile_name="$1"
+          shift
+        else
+          fail "unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+
+  if [[ -z "$profile_name" ]]; then
+    if [[ -t 0 ]]; then
+      printf 'Profile name: '
+      read -r profile_name
+    else
+      fail "add requires a profile name"
+    fi
+  fi
+  validate_profile_name "$profile_name"
+  root="$(omp_root "$profile_name")"
+  if [[ -z "$auth_type" ]]; then
+    if [[ -t 0 ]]; then
+      printf 'Select authentication mode:\n'
+      printf '  1) OMP Auth Broker (OMP_AUTH_BROKER_URL + OMP_AUTH_BROKER_TOKEN)\n'
+      printf '  2) Local (standalone credentials / agent.db)\n'
+      printf 'Choice [1-2]: '
+      local choice=""
+      read -r choice
+      case "$choice" in
+        1|broker|"omp auth broker"|"auth broker")
+          auth_type="broker"
+          ;;
+        2|local)
+          auth_type="local"
+          ;;
+        *)
+          fail "invalid authentication choice: $choice"
+          ;;
+      esac
+    else
+      fail "--auth is required in non-interactive mode (broker or local)"
+    fi
+  fi
+
+  case "$auth_type" in
+    broker|omp-auth-broker|"omp auth broker")
+      auth_type="broker"
+      ;;
+    local)
+      auth_type="local"
+      ;;
+    *)
+      fail "invalid auth type: $auth_type (expected 'broker' or 'local')"
+      ;;
+  esac
+
+  if [[ "$auth_type" == "broker" ]]; then
+    if [[ -z "$broker_url" ]]; then
+      if [[ -t 0 ]]; then
+        printf 'Enter OMP_AUTH_BROKER_URL: '
+        read -r broker_url
+      else
+        fail "--broker-url is required when using broker authentication"
+      fi
+    fi
+    [[ -n "$broker_url" ]] || fail "OMP_AUTH_BROKER_URL cannot be empty"
+    validate_env_value "OMP_AUTH_BROKER_URL" "$broker_url"
+
+    if [[ -z "$broker_token" ]]; then
+      if [[ -t 0 ]]; then
+        printf 'Enter OMP_AUTH_BROKER_TOKEN: '
+        read -r -s broker_token
+        printf '\n'
+      else
+        fail "--broker-token is required when using broker authentication"
+      fi
+    fi
+    [[ -n "$broker_token" ]] || fail "OMP_AUTH_BROKER_TOKEN cannot be empty"
+    validate_env_value "OMP_AUTH_BROKER_TOKEN" "$broker_token"
+  fi
+
+  if [[ -z "$with_agentkit" ]]; then
+    if [[ -t 0 ]]; then
+      printf 'Install AgentKit into this profile? [y/N]: '
+      local ak_choice=""
+      read -r ak_choice
+      case "$ak_choice" in
+        y|Y|yes|YES)
+          with_agentkit="1"
+          ;;
+        *)
+          with_agentkit="0"
+          ;;
+      esac
+    else
+      with_agentkit="0"
+    fi
+  fi
+
+  require_command mise
+  if [[ "$with_agentkit" == "1" ]]; then
+    require_command ak
+  fi
+
+  local config_path="$HOME/.config/mise/config.${profile_name}.toml"
+  local wrapper_path="$HOME/.local/bin/${profile_name}"
+  local env_path="$root/.env"
+  local marker_path="$root/.manager-profile"
+  local ak_marker_path="$root/.agentkit-profile"
+  assert_managed_config_writable "$config_path" "$profile_name"
+  assert_managed_wrapper_writable "$wrapper_path" "$profile_name" omp
+  if [[ -e "$env_path" || -L "$env_path" ]]; then
+    [[ ! -L "$env_path" && -f "$env_path" ]] || fail "managed target is not a regular file: $env_path"
+    local first_line=""
+    IFS= read -r first_line <"$env_path" || true
+    if [[ "$first_line" != "# $MANAGED_MARKER" ]]; then
+      if [[ "$auth_type" == "broker" ]]; then
+        fail "refusing to overwrite user-owned file without managed marker: $env_path"
+      else
+        fail "refusing to remove user-owned file without managed marker: $env_path"
+      fi
+    fi
+  fi
+  assert_managed_marker_file_writable "$marker_path"
+  if [[ "$with_agentkit" == "1" ]]; then
+    assert_managed_marker_file_writable "$ak_marker_path"
+  fi
+  assert_target_writable "$config_path"
+  assert_target_writable "$wrapper_path"
+  assert_target_writable "$marker_path"
+  if [[ "$auth_type" == "broker" || -e "$env_path" || -L "$env_path" ]]; then
+    assert_target_writable "$env_path"
+  fi
+  if [[ "$with_agentkit" == "1" ]]; then
+    assert_target_writable "$ak_marker_path"
+  fi
+
+  ensure_omp_profile "$profile_name"
+  assert_omp_profile_root "$profile_name"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    write_managed_file "$marker_path" "$(printf '# %s\n' "$MANAGED_MARKER")"
+  fi
+
+  if [[ "$auth_type" == "broker" ]]; then
+    write_broker_env "$profile_name" "$broker_url" "$broker_token"
+  else
+    if [[ -e "$env_path" ]]; then
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "would remove broker env: $env_path"
+      else
+        rm -f "$env_path"
+        info "removed broker env: $env_path"
+      fi
+    fi
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "would verify or install OMP runtime for $profile_name"
+    if [[ "$with_agentkit" == "1" ]]; then
+      info "would install AgentKit for $profile_name"
+      write_managed_file "$ak_marker_path" "$(printf '# %s\n' "$MANAGED_MARKER")"
+    fi
+  else
+    local omp_version=""
+    if command -v omp >/dev/null 2>&1; then
+      omp_version="$(mise -E "$profile_name" exec -- omp --version)" \
+        || fail "failed to verify existing OMP in $profile_name: omp --version failed"
+      info "OMP verified: $omp_version"
+    else
+      install_omp_binary latest "$profile_name"
+    fi
+    if [[ "$with_agentkit" == "1" ]]; then
+      install_agentkit "$profile_name" omp
+      write_managed_file "$ak_marker_path" "$(printf '# %s\n' "$MANAGED_MARKER")"
+    fi
+  fi
+  info "profile ready: $profile_name ($auth_type)"
+  info "run: $profile_name"
+  if [[ "$auth_type" == "broker" ]]; then
+    info "verify connection: $profile_name auth-broker status"
+  fi
 }
 
 doctor() {
@@ -1121,12 +1593,21 @@ main() {
       parse_options "$@"
       update_target "$target"
       ;;
-    profiles)
+    add)
+      cmd_add "$@"
+      ;;
+    profiles|profile)
       target="${1:-}"
-      [[ "$target" == "list" ]] || fail "profiles requires: list --json"
-      shift
-      [[ "${1:-}" == "--json" && "$#" -eq 1 ]] || fail "profiles list requires --json"
-      profiles_list_json
+      if [[ "$target" == "list" ]]; then
+        shift
+        [[ "${1:-}" == "--json" && "$#" -eq 1 ]] || fail "$command list requires --json"
+        profiles_list_json
+      elif [[ "$target" == "add" ]]; then
+        shift
+        cmd_add "$@"
+      else
+        fail "$command requires: list --json or add"
+      fi
       ;;
     verify)
       target="${1:-all}"
