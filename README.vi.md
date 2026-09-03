@@ -19,7 +19,7 @@ Mỗi profile có runtime config, skills, extensions và sessions riêng. Profil
 - Bash trên macOS và Linux
 - PowerShell trên Windows native
 
-[Mise](https://mise.jdx.dev/) là dependency runtime; `bootstrap` có thể cài khi máy chưa có. [AgentKit](https://agentkit.best/?ref=OMG49S8R) (`ak`) chỉ bắt buộc cho `pi-ak` và `pi-omp`.
+[Mise](https://mise.jdx.dev/) là dependency runtime; `bootstrap` có thể cài khi máy chưa có. [AgentKit](https://agentkit.best/?ref=OMG49S8R) (`ak`) bắt buộc cho `pi-ak`, `pi-omp`, và profile tùy biến với `--with-agentkit`.
 
 macOS Apple Silicon đã kiểm chứng. macOS Intel và Linux x64/arm64 là target support. Windows 10/11 x64 native là CI-tested, chưa end-to-end với Pi, OMP, AgentKit và provider authentication thật. Windows ARM64 native không hỗ trợ.
 

@@ -19,7 +19,7 @@ Each profile gets its own runtime configuration, skills, extensions, and session
 - Bash on macOS and Linux
 - PowerShell on native Windows
 
-[Mise](https://mise.jdx.dev/) is a runtime dependency; `bootstrap` can install it when missing. [AgentKit](https://agentkit.best/?ref=OMG49S8R) (`ak`) is required only for `pi-ak` and `pi-omp`.
+[Mise](https://mise.jdx.dev/) is a runtime dependency; `bootstrap` can install it when missing. [AgentKit](https://agentkit.best/?ref=OMG49S8R) (`ak`) is required for `pi-ak`, `pi-omp`, and custom profiles with `--with-agentkit`.
 
 macOS Apple Silicon is verified. macOS Intel and Linux x64/arm64 are target support. Native Windows 10/11 x64 is CI-tested, not end-to-end with real Pi, OMP, AgentKit, and provider authentication. Native Windows ARM64 is unsupported.
 

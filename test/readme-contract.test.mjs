@@ -40,7 +40,7 @@ const files = {
 };
 
 function load(name) {
-  return fs.readFileSync(path.join(root, name), "utf8");
+  return fs.readFileSync(path.join(root, name), "utf8").replace(/\r\n/g, "\n");
 }
 
 function headings(text) {
