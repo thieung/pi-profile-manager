@@ -117,7 +117,9 @@ FAKE_PI
 
   cat >"$fake_bin/omp" <<'FAKE_OMP'
 #!/usr/bin/env bash
-set -euo pipefail
+if [[ "${FAKE_OMP_VERSION_FAIL:-0}" == "1" ]]; then
+  exit 1
+fi
 case "${1:-}" in
   --version) printf 'omp/18.0.4\n' ;;
   config)
@@ -150,8 +152,25 @@ elif [[ "$target" == "omp" ]]; then
   fi
   mkdir -p "$skill_root/ak-cook"
   printf '%s\n' '---' 'name: ak-cook' 'description: fake AgentKit cook skill' '---' >"$skill_root/ak-cook/SKILL.md"
-  printf '{"version":1,"kit":"engineer","claims":["%s"]}\n' "$skill_root" >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
-  printf '{"skills":["%s/ak-cook/SKILL.md"]}\n' "$skill_root" >"$HOME/.agentkit/adapters/omp/engineer/.agentkit/native-skill-paths.json"
+  node -e '
+const fs = require("node:fs");
+const [ownershipPath, nativePath, claim, skill] = process.argv.slice(1);
+let ownership = { version: 1, kit: "engineer", claims: [] };
+try { ownership = JSON.parse(fs.readFileSync(ownershipPath, "utf8")); } catch {}
+if (!Array.isArray(ownership.claims)) ownership.claims = [];
+if (!ownership.claims.includes(claim)) ownership.claims.push(claim);
+ownership.version = 1;
+ownership.kit = "engineer";
+fs.writeFileSync(ownershipPath, JSON.stringify(ownership));
+let native = { skills: [] };
+try { native = JSON.parse(fs.readFileSync(nativePath, "utf8")); } catch {}
+if (!Array.isArray(native.skills)) native.skills = [];
+if (!native.skills.includes(skill)) native.skills.push(skill);
+fs.writeFileSync(nativePath, JSON.stringify(native));
+' "$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json" \
+    "$HOME/.agentkit/adapters/omp/engineer/.agentkit/native-skill-paths.json" \
+    "$skill_root" \
+    "$skill_root/ak-cook/SKILL.md"
 fi
 FAKE_AK
 
@@ -168,7 +187,27 @@ case "${1:-}" in
     printf '18.0.4\n'
     exit 0
     ;;
-  use|lock)
+  use)
+    if [[ "$*" == *"oh-my-pi"* ]]; then
+      bindir="$(cd "$(dirname "$0")" && pwd)"
+      cat >"$bindir/omp" <<'FAKE_OMP'
+#!/usr/bin/env bash
+if [[ "${FAKE_OMP_VERSION_FAIL:-0}" == "1" ]]; then
+  exit 1
+fi
+case "${1:-}" in
+  --version) printf 'omp/18.0.4\n' ;;
+  config)
+    [[ "${2:-}" == "path" ]]
+    printf '%s/.omp/profiles/%s/agent\n' "$HOME" "$OMP_PROFILE"
+    ;;
+esac
+FAKE_OMP
+      chmod 0755 "$bindir/omp"
+    fi
+    exit 0
+    ;;
+  lock)
     exit 0
     ;;
   -E)
@@ -182,9 +221,9 @@ case "${1:-}" in
         export PI_CODING_AGENT_SESSION_DIR="$HOME/.pi/profiles/$profile/sessions"
         unset OMP_PROFILE AGENTKIT_OMP_HOME || true
         ;;
-      pi-omp)
-        export OMP_PROFILE="pi-omp"
-        export AGENTKIT_OMP_HOME="$HOME/.omp/profiles/pi-omp/agent"
+      *)
+        export OMP_PROFILE="$profile"
+        export AGENTKIT_OMP_HOME="$HOME/.omp/profiles/$profile/agent"
         unset PI_CODING_AGENT_DIR PI_CODING_AGENT_SESSION_DIR || true
         if [[ "${FAKE_MISE_WRONG_OMP_ROOT:-0}" == "1" ]]; then
           export AGENTKIT_OMP_HOME="$HOME/.omp/agent"
@@ -762,6 +801,260 @@ test_missing_dependency() {
   assert_contains 'missing required command: npm' "$OUTPUT"
   printf 'ok: missing dependency fails clearly\n'
 }
+test_add_profile_broker_and_security() {
+  new_case add-broker
+  run_manager add team-broker --auth broker --broker-url "https://broker.example.com" --broker-token "secret-token-xyz" --no-agentkit --dry-run
+  assert_contains 'would write:' "$OUTPUT"
+  assert_contains 'token redacted' "$OUTPUT"
+  assert_not_contains 'secret-token-xyz' "$OUTPUT"
+  assert_not_exists "$HOME/.omp/profiles/team-broker/agent/.env"
+  assert_not_exists "$HOME/.config/mise/config.team-broker.toml"
+  if run_manager add "bad.name" --auth local --no-agentkit; then
+    fail "dot in profile name unexpectedly succeeded"
+  fi
+  assert_contains 'invalid profile name: bad.name' "$OUTPUT"
+
+  if run_manager add "bad/name" --auth local --no-agentkit; then
+    fail "slash in profile name unexpectedly succeeded"
+  fi
+  assert_contains 'invalid profile name: bad/name' "$OUTPUT"
+
+  if run_manager add "../traversal" --auth local --no-agentkit; then
+    fail "traversal in profile name unexpectedly succeeded"
+  fi
+  assert_contains 'invalid profile name: ../traversal' "$OUTPUT"
+
+  if run_manager add "doctor" --auth local --no-agentkit; then
+    fail "reserved profile name unexpectedly succeeded"
+  fi
+  assert_contains 'reserved profile name: doctor' "$OUTPUT"
+
+
+  if run_manager add bad-url --auth broker --broker-url $'https://broker.example.com\nINJECT=1' --broker-token "tok" --no-agentkit; then
+    fail "newline in broker-url unexpectedly succeeded"
+  fi
+  assert_contains 'cannot contain newline or carriage return' "$OUTPUT"
+  assert_not_exists "$HOME/.config/mise/config.bad-url.toml"
+  assert_not_exists "$HOME/.local/bin/bad-url"
+  assert_not_exists "$HOME/.omp/profiles/bad-url"
+
+  if run_manager add bad-tok --auth broker --broker-url "https://broker.example.com" --broker-token $'tok\r\nINJECT=1' --no-agentkit; then
+    fail "carriage return in broker-token unexpectedly succeeded"
+  fi
+  assert_contains 'cannot contain newline or carriage return' "$OUTPUT"
+  assert_not_exists "$HOME/.config/mise/config.bad-tok.toml"
+  assert_not_exists "$HOME/.local/bin/bad-tok"
+  assert_not_exists "$HOME/.omp/profiles/bad-tok"
+
+  # Refuse overwriting user-owned .env without managed marker
+  mkdir -p "$HOME/.omp/profiles/user-owned/agent"
+  printf 'UNMANAGED_SECRET=123\n' >"$HOME/.omp/profiles/user-owned/agent/.env"
+  if run_manager add user-owned --auth broker --broker-url "https://broker.example.com" --broker-token "tok" --no-agentkit; then
+    fail "overwriting user-owned .env unexpectedly succeeded"
+  fi
+  assert_contains 'refusing to overwrite user-owned file without managed marker' "$OUTPUT"
+  assert_contains 'UNMANAGED_SECRET=123' "$HOME/.omp/profiles/user-owned/agent/.env"
+  assert_not_exists "$HOME/.config/mise/config.user-owned.toml"
+  assert_not_exists "$HOME/.local/bin/user-owned"
+  rm -rf "$HOME/.omp/profiles/user-owned"
+  # Refuse overwriting user-owned .manager-profile without managed marker
+  mkdir -p "$HOME/.omp/profiles/user-marker/agent"
+  printf 'UNMANAGED_MARKER=1\n' >"$HOME/.omp/profiles/user-marker/agent/.manager-profile"
+  if run_manager add user-marker --auth local --no-agentkit; then
+    fail "overwriting user-owned .manager-profile unexpectedly succeeded"
+  fi
+  assert_contains 'refusing to overwrite user-owned file without managed marker' "$OUTPUT"
+  assert_not_exists "$HOME/.config/mise/config.user-marker.toml"
+  assert_not_exists "$HOME/.local/bin/user-marker"
+  rm -rf "$HOME/.omp/profiles/user-marker"
+
+  run_manager add team-broker --auth broker --broker-url "https://broker.example.com" --broker-token "secret-token-xyz" --no-agentkit
+  local env_file="$HOME/.omp/profiles/team-broker/agent/.env"
+  assert_file "$env_file"
+  assert_file "$HOME/.config/mise/config.team-broker.toml"
+  assert_file "$HOME/.local/bin/team-broker"
+
+  local mode
+  mode="$("$NODE_BIN" -e 'process.stdout.write((require("node:fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$env_file")"
+  [[ "$mode" == "600" ]] || fail "expected mode 600 for .env, got $mode"
+
+  assert_contains 'OMP_AUTH_BROKER_URL=https://broker.example.com' "$env_file"
+  assert_contains 'OMP_AUTH_BROKER_TOKEN=secret-token-xyz' "$env_file"
+
+  run_manager add team-broker --auth broker --broker-url "https://broker.example.com" --broker-token "secret-token-new" --no-agentkit
+  local backups
+  backups="$(find "$HOME/.omp/profiles/team-broker/agent" -name "*.bak*" -o -name "*.old*")"
+  [[ -z "$backups" ]] || fail "unexpected backup file created for secrets: $backups"
+
+  run_manager verify team-broker
+  assert_contains 'team-broker verification passed' "$OUTPUT"
+
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'team-broker' 'data.profiles[0].id'
+  assert_json_eq 'omp' 'data.profiles[0].runtime'
+  assert_json_eq 'true' 'data.profiles[0].managed'
+  assert_json_eq 'true' 'data.profiles[0].healthy'
+  # Unrelated Mise configs must NOT be discovered as profiles
+  printf '[tools]\npython = "3.12"\n' >"$HOME/.config/mise/config.python.toml"
+  run_manager_split profiles list --json
+  assert_json_eq '1' 'data.profiles.length'
+  assert_json_eq 'false' 'data.profiles.some((p) => p.id === "python")'
+
+  assert_json_eq 'false' 'data.profiles[0].agentkitEnabled'
+
+  printf 'ok: add profile broker mode and security\n'
+}
+
+test_add_profile_local() {
+  new_case add-local
+  run_manager add team-local --auth local --no-agentkit
+  assert_file "$HOME/.config/mise/config.team-local.toml"
+  assert_file "$HOME/.local/bin/team-local"
+  [[ -d "$HOME/.omp/profiles/team-local/agent" ]] || fail "missing local profile agent directory"
+  assert_not_exists "$HOME/.omp/profiles/team-local/agent/.env"
+  # Refuse overwriting user-owned config and ensure no mutation
+  mkdir -p "$HOME/.config/mise"
+  printf 'user_owned = true\n' >"$HOME/.config/mise/config.user-cfg.toml"
+  if run_manager add user-cfg --auth local --no-agentkit; then
+    fail "overwriting user-owned config unexpectedly succeeded"
+  fi
+  assert_contains 'refusing to overwrite user-owned config without managed marker' "$OUTPUT"
+  assert_contains 'user_owned = true' "$HOME/.config/mise/config.user-cfg.toml"
+  assert_not_exists "$HOME/.local/bin/user-cfg"
+  assert_not_exists "$HOME/.omp/profiles/user-cfg"
+
+
+  run_manager verify team-local
+  assert_contains 'team-local verification passed' "$OUTPUT"
+
+  run_manager add team-switch --auth broker --broker-url "https://broker.example.com" --broker-token "tok" --no-agentkit
+  # Refuse removing user-owned .env when switching or adding local
+  mkdir -p "$HOME/.omp/profiles/user-local/agent"
+  printf 'UNMANAGED_SECRET=999\n' >"$HOME/.omp/profiles/user-local/agent/.env"
+  if run_manager add user-local --auth local --no-agentkit; then
+    fail "removing user-owned .env unexpectedly succeeded"
+  fi
+  assert_contains 'refusing to remove user-owned file without managed marker' "$OUTPUT"
+  assert_contains 'UNMANAGED_SECRET=999' "$HOME/.omp/profiles/user-local/agent/.env"
+
+
+  # Test custom profile add when omp binary is initially missing
+  new_case add-missing-omp
+  rm -f "$FAKE_BIN/omp"
+  run_manager add team-fresh --auth local --no-agentkit
+  assert_file "$FAKE_BIN/omp"
+  assert_contains 'mise|use -g --pin github:can1357/oh-my-pi@18.0.4' "$CALL_LOG"
+  assert_contains 'mise|-E team-fresh exec -- omp --version' "$CALL_LOG"
+  assert_contains 'profile ready: team-fresh (local)' "$OUTPUT"
+
+  # Test add fails if installed OMP version check fails
+  rm -f "$FAKE_BIN/omp"
+  export FAKE_OMP_VERSION_FAIL=1
+  if run_manager add team-fail-omp --auth local --no-agentkit; then
+    fail "add unexpectedly succeeded when omp --version fails"
+  fi
+  unset FAKE_OMP_VERSION_FAIL
+  assert_contains 'failed to verify installed OMP in team-fail-omp: omp --version failed' "$OUTPUT"
+  printf 'ok: add profile local mode\n'
+}
+
+test_add_profile_agentkit_verification() {
+  new_case add-agentkit
+  run_manager add team-ak --auth local --with-agentkit
+
+  run_manager verify team-ak
+  assert_contains 'team-ak verification passed' "$OUTPUT"
+
+  rm -rf "$HOME/.omp/profiles/team-ak/agent/skills"
+  if run_manager verify team-ak; then
+    fail "verify unexpectedly passed for agentkit-enabled profile without skills"
+  fi
+  assert_contains 'AgentKit skills were not installed' "$OUTPUT"
+
+  printf 'ok: add profile agentkit verification honors lifecycle intent\n'
+}
+
+test_add_review_fixes() {
+  new_case add-review-fixes
+  if run_manager add help --auth local --no-agentkit; then
+    fail "reserved help unexpectedly succeeded"
+  fi
+  assert_contains 'reserved profile name: help' "$OUTPUT"
+  if run_manager add pi-dev --auth local --no-agentkit; then
+    fail "reserved pi-dev unexpectedly succeeded"
+  fi
+  assert_contains 'reserved profile name: pi-dev' "$OUTPUT"
+  if run_manager add All --auth local --no-agentkit; then
+    fail "case-folded reserved name unexpectedly succeeded"
+  fi
+  assert_contains 'reserved profile name: All' "$OUTPUT"
+
+  if run_manager verify '../../etc/passwd'; then
+    fail "traversal verify target unexpectedly succeeded"
+  fi
+  assert_contains 'invalid profile name' "$OUTPUT"
+
+  run_manager add team-a --auth local --with-agentkit
+  run_manager add team-b --auth local --with-agentkit
+  run_manager verify team-a
+  run_manager verify team-b
+  run_manager_split profiles list --json
+  assert_json_eq 'true' 'data.profiles.find((p) => p.id === "team-a").agentkitEnabled'
+  assert_json_eq 'true' 'data.profiles.find((p) => p.id === "team-b").agentkitEnabled'
+
+  mkdir -p "$HOME/.config/mise"
+  printf '# managed by pi-profile-manager-custom\nuser=1\n' >"$HOME/.config/mise/config.prefix.toml"
+  if run_manager add prefix --auth local --no-agentkit; then
+    fail "prefix-colliding config unexpectedly overwritten"
+  fi
+  assert_contains 'refusing to overwrite user-owned config without managed marker' "$OUTPUT"
+  assert_contains 'user=1' "$HOME/.config/mise/config.prefix.toml"
+
+  mkdir -p "$HOME/.omp/profiles/negated/agent"
+  printf '# not managed by pi-profile-manager\n' >"$HOME/.omp/profiles/negated/agent/.manager-profile"
+  printf '[env]\nOMP_PROFILE = "negated"\n' >"$HOME/.config/mise/config.negated.toml"
+  printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/negated"
+  chmod 0755 "$HOME/.local/bin/negated"
+  run_manager_split profiles list --json
+  assert_json_eq 'false' 'data.profiles.some((p) => p.id === "negated")'
+
+  mkdir -p "$HOME/.config/mise"
+  chmod 555 "$HOME/.config/mise"
+  if run_manager add ro-cfg --auth local --no-agentkit; then
+    chmod 755 "$HOME/.config/mise"
+    fail "add unexpectedly succeeded with unwritable mise config dir"
+  fi
+  chmod 755 "$HOME/.config/mise"
+  assert_contains 'not writable' "$OUTPUT"
+  assert_not_exists "$HOME/.omp/profiles/ro-cfg"
+
+  mkdir -p "$HOME/.omp/profiles/ak-link/agent"
+  ln -s "$HOME/.omp/profiles/ak-link/missing" "$HOME/.omp/profiles/ak-link/agent/.agentkit-profile"
+  if run_manager add ak-link --auth local --with-agentkit; then
+    fail "symlink .agentkit-profile unexpectedly accepted"
+  fi
+  assert_contains 'managed target is not a regular file' "$OUTPUT"
+  assert_not_exists "$HOME/.config/mise/config.ak-link.toml"
+
+  export FAKE_OMP_VERSION_FAIL=1
+  if run_manager add team-stale-omp --auth local --no-agentkit; then
+    fail "existing omp version failure unexpectedly succeeded"
+  fi
+  unset FAKE_OMP_VERSION_FAIL
+  assert_contains 'failed to verify existing OMP in team-stale-omp: omp --version failed' "$OUTPUT"
+
+  run_manager add team-meta --auth local --with-agentkit
+  printf '{}\n' >"$HOME/.agentkit/adapters/omp/engineer/omp-ownership.json"
+  run_manager_split profiles list --json
+  assert_json_eq 'false' 'data.profiles.find((p) => p.id === "team-meta").agentkitEnabled'
+  if run_manager verify team-meta; then
+    fail "verify unexpectedly passed with malformed ownership"
+  fi
+  assert_contains 'malformed AgentKit ownership metadata' "$OUTPUT"
+
+  printf 'ok: add review findings\n'
+}
 
 test_bootstrap_dry_run_has_no_mutation
 test_bootstrap_existing_mise_is_noop
@@ -801,4 +1094,8 @@ test_update_dry_run_has_no_tool_invocation
 test_omp_update_guards
 test_verify_all
 test_missing_dependency
+test_add_profile_broker_and_security
+test_add_profile_local
+test_add_profile_agentkit_verification
+test_add_review_fixes
 printf 'PASS: pi-profile-manager isolated tests\n'

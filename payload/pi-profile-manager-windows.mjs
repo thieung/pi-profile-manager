@@ -3,10 +3,13 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  accessSync,
+  constants,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -54,6 +57,10 @@ function hasManagedMarker(content) {
   const normalized = content.replaceAll("\r\n", "\n").toLowerCase();
   return normalized.startsWith(`# ${MANAGED_MARKER}\n`) ||
     normalized.startsWith(`@echo off\n@rem ${MANAGED_MARKER}\n`);
+}
+
+function exactManagedFirstLine(content) {
+  return String(content).replaceAll("\r\n", "\n").split("\n")[0] === `# ${MANAGED_MARKER}`;
 }
 
 function defaultRunner(runtimeEnv) {
@@ -132,6 +139,81 @@ function assertSafeManagedPath(root, path) {
     }
   }
 }
+export class PromptCancelledError extends Error {
+  constructor() {
+    super("prompt cancelled");
+    this.code = "ECANCELLED";
+  }
+}
+
+function defaultPrompt(outputStream, inputStream = process.stdin) {
+  return function (question) {
+    outputStream.write(question);
+    const buf = Buffer.alloc(1024);
+    let line = "";
+    while (true) {
+      let bytesRead = 0;
+      try {
+        bytesRead = inputStream.readSync ? inputStream.readSync(0, buf, 0, 1, null) : readSync(0, buf, 0, 1, null);
+      } catch {
+        break;
+      }
+      if (bytesRead === 0) break;
+      const ch = buf.toString("utf8", 0, bytesRead);
+      if (ch === "\n") break;
+      if (ch === "\r") continue;
+      line += ch;
+    }
+    return line.trim();
+  };
+}
+
+export function promptSecretReader(inputStream, outputStream) {
+  return function (question) {
+    outputStream.write(question);
+    if (!inputStream.isTTY) {
+      return defaultPrompt(outputStream, inputStream)("");
+    }
+    inputStream.setRawMode(true);
+    const rawBytes = [];
+    const buf = Buffer.alloc(16);
+    try {
+      while (true) {
+        let bytesRead = 0;
+        try {
+          bytesRead = inputStream.readSync ? inputStream.readSync(0, buf, 0, 1, null) : readSync(0, buf, 0, 1, null);
+        } catch {
+          break;
+        }
+        if (bytesRead === 0) break;
+        const charCode = buf[0];
+        if (charCode === 3) {
+          throw new PromptCancelledError();
+        }
+        if (charCode === 13 || charCode === 10) {
+          outputStream.write("\n");
+          break;
+        }
+        if (charCode === 127 || charCode === 8) {
+          while (rawBytes.length > 0) {
+            const popped = rawBytes.pop();
+            if ((popped & 0xc0) !== 0x80) break;
+          }
+        } else if (charCode >= 32) {
+          for (let i = 0; i < bytesRead; i += 1) rawBytes.push(buf[i]);
+        }
+      }
+    } finally {
+      inputStream.setRawMode(false);
+    }
+    return Buffer.from(rawBytes).toString("utf8");
+  };
+}
+
+function defaultPromptSecret(outputStream) {
+  return promptSecretReader(process.stdin, outputStream);
+}
+
 
 export function createWindowsProfileManager(options = {}) {
   const env = options.env ?? process.env;
@@ -148,9 +230,10 @@ export function createWindowsProfileManager(options = {}) {
   const runner = options.runner ?? defaultRunner(env);
   const output = options.output ?? process.stdout;
   const errorOutput = options.errorOutput ?? process.stderr;
+  const prompt = options.prompt ?? defaultPrompt(output);
+  const promptSecret = options.promptSecret ?? defaultPromptSecret(output);
   let dryRun = false;
   let requestedVersion = "latest";
-
   const binDir = join(home, "bin");
   const miseConfigDir = join(home, ".config", "mise");
   const piProfilesDir = join(home, ".pi", "profiles");
@@ -165,7 +248,7 @@ export function createWindowsProfileManager(options = {}) {
   }
 
   function usage() {
-    output.write(`Usage:\n  ${PROGRAM_NAME} bootstrap [--dry-run]\n  ${PROGRAM_NAME} doctor\n  ${PROGRAM_NAME} install <pi-dev|pi-ak|pi-omp|all> [--dry-run]\n  ${PROGRAM_NAME} update <pi|omp|all> [--version <exact>] [--dry-run]\n  ${PROGRAM_NAME} profiles list --json\n  ${PROGRAM_NAME} verify [pi-dev|pi-ak|pi-omp|all]\n`);
+    output.write(`Usage:\n  ${PROGRAM_NAME} bootstrap [--dry-run]\n  ${PROGRAM_NAME} doctor\n  ${PROGRAM_NAME} install <pi-dev|pi-ak|pi-omp|all> [--dry-run]\n  ${PROGRAM_NAME} add [name] [--auth <broker|local>] [--broker-url <url>] [--broker-token <token>] [--with-agentkit|--no-agentkit] [--dry-run]\n  ${PROGRAM_NAME} update <pi|omp|all> [--version <exact>] [--dry-run]\n  ${PROGRAM_NAME} profiles list --json\n  ${PROGRAM_NAME} verify [pi-dev|pi-ak|pi-omp|<custom>|all]\n`);
   }
 
   function requireCommand(command) {
@@ -230,13 +313,64 @@ export function createWindowsProfileManager(options = {}) {
     info(`wrote: ${path}`);
   }
 
+  function lstatPresent(path) {
+    try {
+      return lstatSync(path);
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  function assertRegularFile(path) {
+    const stat = lstatPresent(path);
+    if (!stat) return null;
+    if (!stat.isFile()) throw new Error(`managed target is not a regular file: ${path}`);
+    return stat;
+  }
+
   function assertManagedFileWritable(path, content) {
     assertSafeManagedPath(home, path);
-    if (!existsSync(path)) return;
-    if (!lstatSync(path).isFile()) throw new Error(`managed target is not a regular file: ${path}`);
+    if (!assertRegularFile(path)) return;
     const existing = readFileSync(path, "utf8");
     if (existing !== content && !hasManagedMarker(existing)) {
       throw new Error(`refusing to overwrite user-owned file without managed marker: ${path}`);
+    }
+  }
+
+  function assertManagedMarkerFileWritable(path) {
+    assertSafeManagedPath(home, path);
+    if (!assertRegularFile(path)) return;
+    if (!exactManagedFirstLine(readFileSync(path, "utf8"))) {
+      throw new Error(`refusing to overwrite user-owned file without managed marker: ${path}`);
+    }
+  }
+
+  function assertTargetWritable(path) {
+    assertSafeManagedPath(home, path);
+    const stat = lstatPresent(path);
+    if (stat) {
+      if (!stat.isFile()) throw new Error(`managed target is not a regular file: ${path}`);
+      try {
+        accessSync(path, constants.W_OK);
+      } catch {
+        throw new Error(`managed target is not writable: ${path}`);
+      }
+    }
+    let dir = dirname(path);
+    while (!lstatPresent(dir)) {
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    const dirStat = lstatPresent(dir);
+    if (!dirStat || !dirStat.isDirectory()) {
+      throw new Error(`managed destination is not writable: ${dir}`);
+    }
+    try {
+      accessSync(dir, constants.W_OK | constants.X_OK);
+    } catch {
+      throw new Error(`managed destination is not writable: ${dir}`);
     }
   }
 
@@ -320,7 +454,7 @@ export function createWindowsProfileManager(options = {}) {
 
   function isUnderRoot(path, root) {
     const rel = relative(resolve(root), resolve(path));
-    return rel === "" || (!rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
+    return rel === "" || (!isAbsolute(rel) && !rel.startsWith("..") && rel !== ".." && !rel.startsWith(`..${sep}`));
   }
 
   function collectStrings(value, output = []) {
@@ -330,34 +464,57 @@ export function createWindowsProfileManager(options = {}) {
     return output;
   }
 
-  function hasWrongOmpClaims(value, root) {
+  function isOmpPathClaim(text) {
+    const normalized = String(text).replaceAll("\\", "/");
+    return isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
+  }
+
+  function hasWrongOmpClaims(value) {
     if (!value) return false;
+    const profilesRoot = join(home, ".omp", "profiles");
+    const defaultRoot = join(home, ".omp", "agent");
     for (const text of collectStrings(value)) {
-      const normalized = text.replaceAll("\\", "/");
-      const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
-      if (!pathClaim) continue;
-      if (!isUnderRoot(text, root)) return true;
+      if (!isOmpPathClaim(text)) continue;
+      if (isUnderRoot(text, defaultRoot) || !isUnderRoot(text, profilesRoot)) return true;
     }
     return false;
   }
 
-  function ompClaimsStayInProfile(root) {
+  function hasTargetProfileClaim(value, root) {
+    if (!value) return false;
+    for (const text of collectStrings(value)) {
+      if (isOmpPathClaim(text) && isUnderRoot(text, root)) return true;
+    }
+    return false;
+  }
+
+  function validOwnership(value) {
+    return Boolean(value && value.version === 1 && value.kit === "engineer" && Array.isArray(value.claims));
+  }
+
+  function validNativePaths(value) {
+    return Boolean(value && Array.isArray(value.skills));
+  }
+
+  function ompClaimsStayInProfile(root, profile = "pi-omp") {
     const ownership = readJsonObject(
       join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"),
-      "pi-omp",
+      profile,
       "ownership",
     );
     const nativePaths = readJsonObject(
       join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"),
-      "pi-omp",
+      profile,
       "native skill paths",
     );
-    if (hasWrongOmpClaims(ownership, root) || hasWrongOmpClaims(nativePaths, root)) return false;
-    return !ownership || (ownership.version === 1 && ownership.kit === "engineer" && Array.isArray(ownership.claims));
+    if (!validOwnership(ownership) || !validNativePaths(nativePaths)) return false;
+    if (hasWrongOmpClaims(ownership) || hasWrongOmpClaims(nativePaths)) return false;
+    return hasTargetProfileClaim(ownership.claims, root) && hasTargetProfileClaim(nativePaths.skills, root);
   }
 
-  function ompAgentKitEnabled() {
-    return hasAkSkills(ompProfileRoot) && ompClaimsStayInProfile(ompProfileRoot);
+  function ompAgentKitEnabled(profile = "pi-omp") {
+    const root = ompRoot(profile);
+    return hasAkSkills(root) && ompClaimsStayInProfile(root, profile);
   }
 
   function piRuntimeHealthy(profile) {
@@ -375,22 +532,27 @@ export function createWindowsProfileManager(options = {}) {
     }
   }
 
-  function ompRuntimeHealthy() {
+  function ompRuntimeHealthy(profile = "pi-omp") {
     try {
       const script = [
         "const e=process['env'];",
         "process.stdout.write(JSON.stringify({root:e.AGENTKIT_OMP_HOME||'',pi:e.PI_CODING_AGENT_DIR||null}))",
       ].join("");
-      const values = JSON.parse(captureCommand("mise", ["-E", "pi-omp", "exec", "--", "node", "-e", script]));
-      if (resolve(values.root || "").toLowerCase() !== resolve(ompProfileRoot).toLowerCase() || values.pi !== null) {
+      const profileRoot = ompRoot(profile);
+      const values = JSON.parse(captureCommand("mise", ["-E", profile, "exec", "--", "node", "-e", script]));
+      if (resolve(values.root || "").toLowerCase() !== resolve(profileRoot).toLowerCase() || values.pi !== null) {
         return false;
       }
-      const runtimeRoot = captureCommand("mise", ["-E", "pi-omp", "exec", "--", "omp", "config", "path"]);
-      return resolve(runtimeRoot).toLowerCase() === resolve(ompProfileRoot).toLowerCase();
+      const runtimeRoot = captureCommand("mise", ["-E", profile, "exec", "--", "omp", "config", "path"]);
+      return resolve(runtimeRoot).toLowerCase() === resolve(profileRoot).toLowerCase();
     } catch {
-      warnProfile("pi-omp", "runtime environment did not resolve");
+      warnProfile(profile, "runtime environment did not resolve");
       return false;
     }
+  }
+
+  function ompRoot(profile = "pi-omp") {
+    return join(home, ".omp", "profiles", profile, "agent");
   }
 
   function piRoot(profile) {
@@ -413,12 +575,13 @@ export function createWindowsProfileManager(options = {}) {
     ].join("\n");
   }
 
-  function ompConfig() {
+  function ompConfig(profile = "pi-omp") {
+    const profileRoot = ompRoot(profile);
     return [
       `# ${MANAGED_MARKER}`,
       "[env]",
-      'OMP_PROFILE = "pi-omp"',
-      `AGENTKIT_OMP_HOME = ${tomlString(ompProfileRoot)}`,
+      `OMP_PROFILE = "${profile}"`,
+      `AGENTKIT_OMP_HOME = ${tomlString(profileRoot)}`,
       "PI_PROFILE = false",
       "PI_CODING_AGENT_DIR = false",
       "PI_CODING_AGENT_SESSION_DIR = false",
@@ -500,20 +663,21 @@ export function createWindowsProfileManager(options = {}) {
     writeManagedFile(wrapperPath, wrapperContent);
   }
 
-  function ensureOmpProfile() {
-    const configPath = join(miseConfigDir, "config.pi-omp.toml");
-    const wrapperPath = join(binDir, "pi-omp.cmd");
-    const configContent = ompConfig();
-    const wrapperContent = wrapper("pi-omp", "omp");
+  function ensureOmpProfile(profile = "pi-omp") {
+    const configPath = join(miseConfigDir, `config.${profile}.toml`);
+    const wrapperPath = join(binDir, `${profile}.cmd`);
+    const configContent = ompConfig(profile);
+    const wrapperContent = wrapper(profile, "omp");
     assertManagedFileWritable(configPath, configContent);
     assertManagedFileWritable(wrapperPath, wrapperContent);
+    const profileRoot = ompRoot(profile);
     if (!dryRun) {
-      assertSafeManagedPath(home, ompProfileRoot);
-      mkdirSync(ompProfileRoot, { recursive: true });
+      assertSafeManagedPath(home, profileRoot);
+      mkdirSync(profileRoot, { recursive: true });
       mkdirSync(miseConfigDir, { recursive: true });
       mkdirSync(binDir, { recursive: true });
     } else {
-      info(`would create profile directories: ${ompProfileRoot}`);
+      info(`would create profile directories: ${profileRoot}`);
     }
     writeManagedFile(configPath, configContent);
     writeManagedFile(wrapperPath, wrapperContent);
@@ -560,18 +724,19 @@ export function createWindowsProfileManager(options = {}) {
     info(`${profile} root verified: ${actual}`);
   }
 
-  function assertOmpProfileRoot() {
+  function assertOmpProfileRoot(profile = "pi-omp") {
+    const expected = ompRoot(profile);
     if (dryRun) {
-      info(`would assert pi-omp root: ${ompProfileRoot}`);
+      info(`would assert ${profile} root: ${expected}`);
       return;
     }
     const script = "process.stdout.write(JSON.stringify({root:process.env.AGENTKIT_OMP_HOME||'',pi:process.env.PI_CODING_AGENT_DIR||null}))";
-    const values = JSON.parse(captureCommand("mise", ["-E", "pi-omp", "exec", "--", "node", "-e", script]));
-    if (resolve(values.root).toLowerCase() !== resolve(ompProfileRoot).toLowerCase()) {
-      throw new Error(`pi-omp resolved root '${values.root}'; expected '${ompProfileRoot}'`);
+    const values = JSON.parse(captureCommand("mise", ["-E", profile, "exec", "--", "node", "-e", script]));
+    if (resolve(values.root).toLowerCase() !== resolve(expected).toLowerCase()) {
+      throw new Error(`${profile} resolved root '${values.root}'; expected '${expected}'`);
     }
-    if (values.pi !== null) throw new Error(`pi-omp unexpectedly inherits PI_CODING_AGENT_DIR='${values.pi}'`);
-    info(`pi-omp root verified: ${values.root}`);
+    if (values.pi !== null) throw new Error(`${profile} unexpectedly inherits PI_CODING_AGENT_DIR='${values.pi}'`);
+    info(`${profile} root verified: ${values.root}`);
   }
 
   function bootstrapMise() {
@@ -616,7 +781,7 @@ export function createWindowsProfileManager(options = {}) {
     return version === "latest" ? captureCommand("mise", ["latest", OMP_TOOL]) : version;
   }
 
-  function installOmpBinary(version) {
+  function installOmpBinary(version, profile = "pi-omp") {
     requireCommand("mise");
     validateVersion(version);
     const resolved = resolveOmpVersion(version);
@@ -627,7 +792,7 @@ export function createWindowsProfileManager(options = {}) {
     runCommand("mise", ["use", "-g", "--pin", `${OMP_TOOL}@${resolved}`], { ...env, MISE_LOCKED: "0" });
     runCommand("mise", ["lock", "-g", OMP_TOOL]);
     if (!dryRun) {
-      info(`OMP installed: ${captureCommand("mise", ["-E", "pi-omp", "exec", "--", "omp", "--version"])}`);
+      info(`OMP installed: ${captureCommand("mise", ["-E", profile, "exec", "--", "omp", "--version"])}`);
     }
   }
 
@@ -638,8 +803,8 @@ export function createWindowsProfileManager(options = {}) {
     }
   }
 
-  function firstOmpAkSkill() {
-    const skillsRoot = join(ompProfileRoot, "skills");
+  function firstOmpAkSkill(profile = "pi-omp") {
+    const skillsRoot = join(ompRoot(profile), "skills");
     try {
       for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
         const skill = join(skillsRoot, entry.name, "SKILL.md");
@@ -651,50 +816,61 @@ export function createWindowsProfileManager(options = {}) {
     return null;
   }
 
-  function firstWrongOmpClaim() {
-    const ownership = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"), "pi-omp", "ownership");
-    const nativePaths = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"), "pi-omp", "native skill paths");
+  function firstWrongOmpClaim(profile = "pi-omp") {
+    const ownership = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"), profile, "ownership");
+    const nativePaths = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"), profile, "native skill paths");
     for (const value of [ownership, nativePaths]) {
       for (const text of collectStrings(value)) {
-        const normalized = text.replaceAll("\\", "/");
-        const pathClaim = isAbsolute(text) || normalized.includes("/.omp/") || normalized.includes(":/.omp/");
-        if (!pathClaim || isUnderRoot(text, ompProfileRoot)) continue;
-        return text;
+        if (!isOmpPathClaim(text)) continue;
+        if (isUnderRoot(text, join(home, ".omp", "agent")) || !isUnderRoot(text, join(home, ".omp", "profiles"))) {
+          return text;
+        }
       }
     }
     return null;
   }
 
-  function assertOmpAgentKitInstalled() {
-    const skill = firstOmpAkSkill();
-    const wrongClaim = firstWrongOmpClaim();
-    if (skill && !wrongClaim) return skill;
+  function assertOmpAgentKitInstalled(profile = "pi-omp") {
+    const skill = firstOmpAkSkill(profile);
+    const profileRoot = ompRoot(profile);
+    const ownership = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", "omp-ownership.json"), profile, "ownership");
+    const nativePaths = readJsonObject(join(home, ".agentkit", "adapters", "omp", "engineer", ".agentkit", "native-skill-paths.json"), profile, "native skill paths");
+    const wrongClaim = firstWrongOmpClaim(profile);
+    const missingTarget = !hasTargetProfileClaim(ownership && ownership.claims, profileRoot) ||
+      !hasTargetProfileClaim(nativePaths && nativePaths.skills, profileRoot);
+    if (skill && !wrongClaim && validOwnership(ownership) && validNativePaths(nativePaths) && !missingTarget) {
+      return skill;
+    }
     const defaultSkills = join(home, ".omp", "agent", "skills");
     const found = skill || (existsSync(defaultSkills) ? defaultSkills : "none");
     throw new Error([
-      "pi-omp AgentKit skills were not installed into the named OMP profile.",
-      `AGENTKIT_OMP_HOME=${ompProfileRoot}`,
+      `${profile} AgentKit skills were not installed into the named OMP profile.`,
+      `AGENTKIT_OMP_HOME=${profileRoot}`,
       `actual skills root found=${found}`,
       `wrong default destination=${defaultSkills}`,
       wrongClaim ? `out-of-profile claim=${wrongClaim}` : null,
-      "repair: re-run pi-profile-manager install pi-omp",
+      !validOwnership(ownership) ? (ownership ? "malformed AgentKit ownership metadata" : "missing AgentKit ownership metadata") : null,
+      !validNativePaths(nativePaths) ? (nativePaths ? "malformed AgentKit native skill paths" : "missing AgentKit native skill paths") : null,
+      !wrongClaim && missingTarget ? "missing in-profile AgentKit claim" : null,
+      `repair: re-run pi-profile-manager install ${profile}`,
     ].filter(Boolean).join(" "));
   }
 
   function installAgentKit(profile, target) {
     requireCommand("ak");
     if (target === "pi") assertPiProfileRoot(profile);
-    else assertOmpProfileRoot();
+    else assertOmpProfileRoot(profile);
     runCommand("mise", [
       "-E", profile, "exec", "--", "ak", "kit", "init", "engineer",
       "--target", target, "--global", "--channel", "beta", "--yes", "--no-interactive",
     ]);
     if (target === "omp") {
+      const profileRoot = ompRoot(profile);
       if (dryRun) {
-        info(`would assert AgentKit skills under: ${join(ompProfileRoot, "skills", "ak-*", "SKILL.md")}`);
+        info(`would assert AgentKit skills under: ${join(profileRoot, "skills", "ak-*", "SKILL.md")}`);
         info(`would reject default OMP AgentKit destination: ${join(home, ".omp", "agent", "skills")}`);
       } else {
-        info(`pi-omp AgentKit skill verified: ${assertOmpAgentKitInstalled()}`);
+        info(`${profile} AgentKit skill verified: ${assertOmpAgentKitInstalled(profile)}`);
       }
     }
   }
@@ -758,33 +934,73 @@ export function createWindowsProfileManager(options = {}) {
     };
   }
 
-  function ompInventoryProfile() {
-    const config = readProfileFile(join(miseConfigDir, "config.pi-omp.toml"));
-    const wrapperFile = readProfileFile(join(binDir, "pi-omp.cmd"));
+  function ompInventoryProfile(profile = "pi-omp") {
+    const config = readProfileFile(join(miseConfigDir, `config.${profile}.toml`));
+    const wrapperFile = readProfileFile(join(binDir, `${profile}.cmd`));
     if (!config.exists && !wrapperFile.exists) return null;
+    const profileRoot = ompRoot(profile);
+    const markerPath = join(profileRoot, ".manager-profile");
+    let markerOk = profile === "pi-omp";
+    if (!markerOk) {
+      try {
+        const marker = readProfileFile(markerPath);
+        markerOk = marker.exists && marker.regular && exactManagedFirstLine(marker.content);
+      } catch {
+        markerOk = false;
+      }
+    }
     const managed = config.regular && wrapperFile.regular &&
-      hasManagedMarker(config.content) && hasManagedMarker(wrapperFile.content);
-    if (!managed) warnProfile("pi-omp", "managed evidence is incomplete or foreign");
-    const contentMatches = matchesManagedContent(config.content, ompConfig()) &&
-      matchesManagedContent(wrapperFile.content, wrapper("pi-omp", "omp"));
-    if (managed && !contentMatches) warnProfile("pi-omp", "managed artifacts are drifted");
+      hasManagedMarker(config.content) && hasManagedMarker(wrapperFile.content) && markerOk;
+    if (!managed) warnProfile(profile, "managed evidence is incomplete or foreign");
+    const contentMatches = matchesManagedContent(config.content, ompConfig(profile)) &&
+      matchesManagedContent(wrapperFile.content, wrapper(profile, "omp"));
+    if (managed && !contentMatches) warnProfile(profile, "managed artifacts are drifted");
     return {
-      id: "pi-omp",
+      id: profile,
       runtime: "omp",
-      agentDir: resolve(ompProfileRoot),
+      agentDir: resolve(profileRoot),
       sessionDir: null,
-      agentkitEnabled: ompAgentKitEnabled(),
+      agentkitEnabled: ompAgentKitEnabled(profile),
       managed,
-      healthy: managed && contentMatches && isDirectory(ompProfileRoot) && ompRuntimeHealthy(),
+      healthy: managed && contentMatches && isDirectory(profileRoot) && ompRuntimeHealthy(profile),
     };
   }
 
   function listProfilesJson() {
-    const profiles = [
-      piInventoryProfile("pi-dev"),
-      piInventoryProfile("pi-ak"),
-      ompInventoryProfile(),
-    ].filter(Boolean);
+    const defaultProfiles = ["pi-dev", "pi-ak", "pi-omp"];
+    const discovered = new Set(defaultProfiles);
+    const ompProfilesDir = join(home, ".omp", "profiles");
+    if (isDirectory(ompProfilesDir)) {
+      let entries = [];
+      try {
+        entries = readdirSync(ompProfilesDir, { withFileTypes: true });
+      } catch {}
+      for (const entry of entries) {
+        try {
+          if (!entry.isDirectory()) continue;
+          const id = entry.name;
+          if (defaultProfiles.includes(id)) continue;
+          const markerPath = join(ompProfilesDir, id, "agent", ".manager-profile");
+          const marker = readProfileFile(markerPath);
+          if (marker.exists && marker.regular && exactManagedFirstLine(marker.content)) {
+            discovered.add(id);
+          }
+        } catch {}
+      }
+    }
+    const profilesList = [];
+    const orderedProfiles = [
+      ...defaultProfiles,
+      ...Array.from(discovered).filter((id) => !defaultProfiles.includes(id)).sort(),
+    ];
+    for (const id of orderedProfiles) {
+      if (id === "pi-dev" || id === "pi-ak") {
+        profilesList.push(piInventoryProfile(id));
+      } else {
+        profilesList.push(ompInventoryProfile(id));
+      }
+    }
+    const profiles = profilesList.filter(Boolean);
     output.write(`${JSON.stringify({ schemaVersion: 1, profiles })}\n`);
   }
 
@@ -855,26 +1071,297 @@ export function createWindowsProfileManager(options = {}) {
     info(`${profile} verification passed`);
   }
 
-  function verifyOmpProfile() {
-    const config = join(miseConfigDir, "config.pi-omp.toml");
-    const wrapperPath = join(binDir, "pi-omp.cmd");
-    assertManagedFileOwned(config, "pi-omp verify");
-    assertManagedFileOwned(wrapperPath, "pi-omp verify");
-    assertOmpProfileRoot();
-    const runtimeRoot = captureCommand("mise", ["-E", "pi-omp", "exec", "--", "omp", "config", "path"]);
-    if (resolve(runtimeRoot).toLowerCase() !== resolve(ompProfileRoot).toLowerCase()) {
-      throw new Error(`pi-omp config path '${runtimeRoot}'; expected '${ompProfileRoot}'`);
+  function verifyOmpProfile(profile = "pi-omp") {
+    const config = join(miseConfigDir, `config.${profile}.toml`);
+    const wrapperPath = join(binDir, `${profile}.cmd`);
+    assertManagedFileOwned(config, `${profile} verify`);
+    assertManagedFileOwned(wrapperPath, `${profile} verify`);
+    assertOmpProfileRoot(profile);
+    const profileRoot = ompRoot(profile);
+    const runtimeRoot = captureCommand("mise", ["-E", profile, "exec", "--", "omp", "config", "path"]);
+    if (resolve(runtimeRoot).toLowerCase() !== resolve(profileRoot).toLowerCase()) {
+      throw new Error(`${profile} config path '${runtimeRoot}'; expected '${profileRoot}'`);
     }
-    assertOmpAgentKitInstalled();
-    info("pi-omp verification passed");
+    const skillsRoot = join(profileRoot, "skills");
+    const marker = join(profileRoot, ".agentkit-profile");
+    if (profile === "pi-omp" || existsSync(marker)) {
+      assertOmpAgentKitInstalled(profile);
+    } else if (existsSync(skillsRoot)) {
+      try {
+        const hasSkills = readdirSync(skillsRoot, { withFileTypes: true }).some(
+          (e) => e.isDirectory() && e.name.startsWith("ak-") && existsSync(join(skillsRoot, e.name, "SKILL.md")),
+        );
+        if (hasSkills) assertOmpAgentKitInstalled(profile);
+      } catch {}
+    }
+    info(`${profile} verification passed`);
   }
 
   function verifyTarget(target) {
     requireCommand("mise");
     if (["pi-dev", "all"].includes(target)) verifyPiProfile("pi-dev");
     if (["pi-ak", "all"].includes(target)) verifyPiProfile("pi-ak");
-    if (["pi-omp", "all"].includes(target)) verifyOmpProfile();
-    if (!["pi-dev", "pi-ak", "pi-omp", "all"].includes(target)) throw new Error(`unknown verify target: ${target}`);
+    if (["pi-omp", "all"].includes(target)) verifyOmpProfile("pi-omp");
+    if (["pi-dev", "pi-ak", "pi-omp", "all"].includes(target)) return;
+
+    validateProfileName(target);
+    const config = join(miseConfigDir, `config.${target}.toml`);
+    const wrapperPath = join(binDir, `${target}.cmd`);
+    if (existsSync(config) || existsSync(wrapperPath)) {
+      if (existsSync(config)) {
+        const content = readFileSync(config, "utf8");
+        if (content.includes("OMP_PROFILE =")) {
+          verifyOmpProfile(target);
+          return;
+        }
+        if (content.includes('PI_CODING_AGENT_DIR = "')) {
+          verifyPiProfile(target);
+          return;
+        }
+      }
+      verifyOmpProfile(target);
+      return;
+    }
+    throw new Error(`unknown verify target: ${target}`);
+  }
+
+  function validateEnvValue(label, value) {
+    if (value.includes("\r") || value.includes("\n")) {
+      throw new Error(`${label} cannot contain newline or carriage return`);
+    }
+  }
+
+  function brokerEnvContent(url, token) {
+    return [
+      `# ${MANAGED_MARKER}`,
+      `OMP_AUTH_BROKER_URL=${url}`,
+      `OMP_AUTH_BROKER_TOKEN=${token}`,
+      "",
+    ].join("\n");
+  }
+
+  function writeBrokerEnv(profile, url, token) {
+    validateEnvValue("OMP_AUTH_BROKER_URL", url);
+    validateEnvValue("OMP_AUTH_BROKER_TOKEN", token);
+    const profileRoot = ompRoot(profile);
+    const envPath = join(profileRoot, ".env");
+    assertSafeManagedPath(home, envPath);
+
+    if (assertRegularFile(envPath)) {
+      const existing = readFileSync(envPath, "utf8");
+      if (!hasManagedMarker(existing)) {
+        throw new Error(`refusing to overwrite user-owned file without managed marker: ${envPath}`);
+      }
+    }
+
+    if (dryRun) {
+      info(`would write: ${envPath} (token redacted)`);
+      return;
+    }
+
+    mkdirSync(profileRoot, { recursive: true });
+    const staged = `${envPath}.tmp-${uniqueSuffix()}`;
+    try {
+      writeFileSync(staged, brokerEnvContent(url, token), { mode: 0o600, flag: "wx" });
+      renameSync(staged, envPath);
+    } finally {
+      if (existsSync(staged)) rmSync(staged, { force: true });
+    }
+    info(`wrote: ${envPath}`);
+  }
+
+  function validateProfileName(name) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) throw new Error(`invalid profile name: ${name}`);
+    const lower = name.toLowerCase();
+    const reserved = [
+      "all", "pi", "omp", "doctor", "update", "install", "verify", "bootstrap", "add", "list", "profiles", "profile", "help",
+      "pi-dev", "pi-ak", "pi-omp",
+      "con", "prn", "aux", "nul",
+      "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+      "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    if (reserved.includes(lower)) {
+      throw new Error(`reserved profile name: ${name}`);
+    }
+  }
+
+  function cmdAdd(args) {
+    let profileName = "";
+    let authType = "";
+    let brokerUrl = "";
+    let brokerToken = "";
+    let withAgentkit = null;
+    let interactive = false;
+
+    let index = 0;
+    while (index < args.length) {
+      const arg = args[index];
+      if (arg === "--auth") {
+        if (index + 1 >= args.length) throw new Error("--auth requires a value (broker or local)");
+        authType = args[index + 1];
+        index += 2;
+      } else if (arg === "--broker-url") {
+        if (index + 1 >= args.length) throw new Error("--broker-url requires a value");
+        brokerUrl = args[index + 1];
+        index += 2;
+      } else if (arg === "--broker-token") {
+        if (index + 1 >= args.length) throw new Error("--broker-token requires a value");
+        brokerToken = args[index + 1];
+        index += 2;
+      } else if (arg === "--with-agentkit") {
+        withAgentkit = true;
+        index++;
+      } else if (arg === "--no-agentkit") {
+        withAgentkit = false;
+        index++;
+      } else if (arg === "--dry-run") {
+        dryRun = true;
+        index++;
+      } else if (["-h", "--help"].includes(arg)) {
+        usage();
+        return;
+      } else if (arg.startsWith("-")) {
+        throw new Error(`unknown option: ${arg}`);
+      } else {
+        if (!profileName) {
+          profileName = arg;
+          index++;
+        } else {
+          throw new Error(`unexpected argument: ${arg}`);
+        }
+      }
+    }
+
+    if (!profileName) {
+      interactive = true;
+      profileName = prompt("Profile name: ");
+    }
+    if (!profileName) throw new Error("add requires a profile name");
+    validateProfileName(profileName);
+
+    if (!authType) {
+      interactive = true;
+      output.write("Select authentication mode:\n");
+      output.write("  1) OMP Auth Broker (OMP_AUTH_BROKER_URL + OMP_AUTH_BROKER_TOKEN)\n");
+      output.write("  2) Local (standalone credentials / agent.db)\n");
+      const choice = prompt("Choice [1-2]: ");
+      if (["1", "broker", "omp auth broker", "auth broker"].includes(choice.toLowerCase())) {
+        authType = "broker";
+      } else if (["2", "local"].includes(choice.toLowerCase())) {
+        authType = "local";
+      } else {
+        throw new Error(`invalid authentication choice: ${choice}`);
+      }
+    }
+
+    if (!["broker", "local"].includes(authType.toLowerCase())) {
+      throw new Error(`invalid auth type: ${authType} (expected 'broker' or 'local')`);
+    }
+    authType = authType.toLowerCase();
+
+    if (authType === "broker") {
+      if (!brokerUrl) {
+        interactive = true;
+        brokerUrl = prompt("Enter OMP_AUTH_BROKER_URL: ");
+      }
+      if (!brokerUrl) throw new Error("--broker-url is required when using broker authentication");
+      validateEnvValue("OMP_AUTH_BROKER_URL", brokerUrl);
+
+      if (!brokerToken) {
+        interactive = true;
+        brokerToken = promptSecret("Enter OMP_AUTH_BROKER_TOKEN: ");
+      }
+      if (!brokerToken) throw new Error("--broker-token is required when using broker authentication");
+      validateEnvValue("OMP_AUTH_BROKER_TOKEN", brokerToken);
+    }
+
+    if (withAgentkit === null) {
+      if (interactive) {
+        const akChoice = prompt("Install AgentKit into this profile? [y/N]: ");
+        withAgentkit = ["y", "yes"].includes(akChoice.toLowerCase());
+      } else {
+        withAgentkit = false;
+      }
+    }
+
+    requireCommand("mise");
+    if (withAgentkit) requireCommand("ak");
+
+    const configPath = join(miseConfigDir, `config.${profileName}.toml`);
+    const wrapperPath = join(binDir, `${profileName}.cmd`);
+    const profileRoot = ompRoot(profileName);
+    const envPath = join(profileRoot, ".env");
+    const markerPath = join(profileRoot, ".manager-profile");
+    const akMarkerPath = join(profileRoot, ".agentkit-profile");
+
+    assertManagedFileWritable(configPath, ompConfig(profileName));
+    assertManagedFileWritable(wrapperPath, wrapper(profileName, "omp"));
+
+    const envStat = lstatPresent(envPath);
+    if (envStat) {
+      if (!envStat.isFile()) throw new Error(`managed target is not a regular file: ${envPath}`);
+      const existing = readFileSync(envPath, "utf8");
+      if (!hasManagedMarker(existing) && !exactManagedFirstLine(existing)) {
+        if (authType === "broker") {
+          throw new Error(`refusing to overwrite user-owned file without managed marker: ${envPath}`);
+        } else {
+          throw new Error(`refusing to remove user-owned file without managed marker: ${envPath}`);
+        }
+      }
+    }
+
+    assertManagedMarkerFileWritable(markerPath);
+    if (withAgentkit) assertManagedMarkerFileWritable(akMarkerPath);
+    assertTargetWritable(configPath);
+    assertTargetWritable(wrapperPath);
+    assertTargetWritable(markerPath);
+    if (authType === "broker" || envStat) assertTargetWritable(envPath);
+    if (withAgentkit) assertTargetWritable(akMarkerPath);
+
+    ensureOmpProfile(profileName);
+    assertOmpProfileRoot(profileName);
+    if (!dryRun) {
+      writeManagedFile(markerPath, `# ${MANAGED_MARKER}\n`);
+    }
+
+    if (authType === "broker") {
+      writeBrokerEnv(profileName, brokerUrl, brokerToken);
+    } else if (envStat) {
+      if (dryRun) {
+        info(`would remove broker env: ${envPath}`);
+      } else {
+        rmSync(envPath, { force: true });
+        info(`removed broker env: ${envPath}`);
+      }
+    }
+
+    if (dryRun) {
+      info(`would verify or install OMP runtime for ${profileName}`);
+      if (withAgentkit) {
+        info(`would install AgentKit for ${profileName}`);
+        writeManagedFile(akMarkerPath, `# ${MANAGED_MARKER}\n`);
+      }
+    } else {
+      if (runner.exists("omp")) {
+        try {
+          info(`OMP verified: ${captureCommand("mise", ["-E", profileName, "exec", "--", "omp", "--version"])}`);
+        } catch {
+          throw new Error(`failed to verify existing OMP in ${profileName}: omp --version failed`);
+        }
+      } else {
+        installOmpBinary("latest", profileName);
+      }
+      if (withAgentkit) {
+        installAgentKit(profileName, "omp");
+        writeManagedFile(akMarkerPath, `# ${MANAGED_MARKER}\n`);
+      }
+    }
+
+    info(`profile ready: ${profileName} (${authType})`);
+    info(`run: ${profileName}`);
+    if (authType === "broker") {
+      info(`verify connection: ${profileName} auth-broker status`);
+    }
   }
 
   function doctor() {
@@ -941,10 +1428,20 @@ export function createWindowsProfileManager(options = {}) {
       if (!target) throw new Error("update requires pi, omp, or all");
       if (parseOptions(args) === "help") return;
       updateTarget(target);
-    } else if (command === "profiles") {
+    } else if (command === "add") {
+      cmdAdd(args);
+    } else if (["profiles", "profile"].includes(command)) {
       const target = args.shift();
-      if (target !== "list") throw new Error("profiles requires: list --json");
-      if (args.length !== 1 || args[0] !== "--json") throw new Error("profiles list requires --json");
+      if (target === "list") {
+        if (args.length !== 1 || args[0] !== "--json") throw new Error(`${command} list requires --json`);
+        listProfilesJson();
+      } else if (target === "add") {
+        cmdAdd(args);
+      } else {
+        throw new Error(`${command} requires: list --json or add`);
+      }
+    } else if (command === "list") {
+      if (args.length !== 1 || args[0] !== "--json") throw new Error("list requires --json");
       listProfilesJson();
     } else if (command === "verify") {
       if (args.length > 1) throw new Error("verify accepts at most one target");
@@ -963,7 +1460,11 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   try {
     createWindowsProfileManager().main(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(`ERROR: ${error.message}\n`);
-    process.exitCode = 1;
+    if (error.code === "ECANCELLED") {
+      process.exitCode = 130;
+    } else {
+      process.stderr.write(`ERROR: ${error.message}\n`);
+      process.exitCode = 1;
+    }
   }
 }

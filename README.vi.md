@@ -114,6 +114,40 @@ pi-profile-manager install pi-omp
 
 pi-profile-manager verify all
 ```
+## Thêm profile mới
+
+Tạo profile Oh My Pi tùy biến với tùy chọn OMP Auth Broker hoặc local credential:
+
+```bash
+# Thiết lập tương tác qua terminal:
+pi-profile-manager add
+# hoặc chỉ định tên trước:
+pi-profile-manager add my-team
+
+# Chế độ OMP Auth Broker:
+pi-profile-manager add my-team \
+  --auth broker \
+  --broker-url https://broker.example.internal \
+  --broker-token "$OMP_AUTH_BROKER_TOKEN"
+
+# Xem trước dry-run:
+pi-profile-manager add my-team \
+  --auth broker \
+  --broker-url https://broker.example.internal \
+  --broker-token "$OMP_AUTH_BROKER_TOKEN" \
+  --dry-run
+
+# Chế độ Local kèm AgentKit:
+pi-profile-manager add my-local \
+  --auth local \
+  --with-agentkit
+
+# Kiểm tra profile:
+pi-profile-manager verify my-team
+```
+
+Khi chọn chế độ broker, `OMP_AUTH_BROKER_URL` và `OMP_AUTH_BROKER_TOKEN` được lưu vào `~/.omp/profiles/<name>/agent/.env`. Trên macOS và Linux (POSIX), file được giới hạn quyền nghiêm ngặt `0600` (chỉ chủ sở hữu đọc/ghi). Trên Windows, file kế thừa user-scoped ACL từ `%USERPROFILE%`. Manager tuyệt đối không tạo bản backup chứa thông tin bí mật.
+
 
 ## Xem Profile Đã Cài
 

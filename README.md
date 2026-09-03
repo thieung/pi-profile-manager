@@ -114,6 +114,39 @@ pi-profile-manager install pi-omp
 
 pi-profile-manager verify all
 ```
+## Add custom profile
+
+Create a custom Oh My Pi profile with either OMP Auth Broker or local credentials:
+
+```bash
+# Interactive setup:
+pi-profile-manager add
+# or specify the name:
+pi-profile-manager add my-team
+
+# OMP Auth Broker mode:
+pi-profile-manager add my-team \
+  --auth broker \
+  --broker-url https://broker.example.internal \
+  --broker-token "$OMP_AUTH_BROKER_TOKEN"
+
+# Dry-run preview:
+pi-profile-manager add my-team \
+  --auth broker \
+  --broker-url https://broker.example.internal \
+  --broker-token "$OMP_AUTH_BROKER_TOKEN" \
+  --dry-run
+
+# Local mode with AgentKit:
+pi-profile-manager add my-local \
+  --auth local \
+  --with-agentkit
+
+# Verify custom profile:
+pi-profile-manager verify my-team
+```
+When broker mode is selected, `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN` are stored into `~/.omp/profiles/<name>/agent/.env`. On macOS and Linux (POSIX), permissions are strictly set to `0600` (read/write by owner only). On Windows, files inherit user-scoped ACLs from `%USERPROFILE%`. The manager never creates backup copies containing secrets.
+
 
 ## Discover installed profiles
 
