@@ -2,7 +2,7 @@
 
 [English](README.md) | [Tiếng Việt](README.vi.md)
 
-Package bootstrap công khai cho ba profile độc lập của [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi) và [AgentKit](https://agentkit.best/?ref=OMG49S8R):
+Cài và duy trì ba profile độc lập cho [Pi](https://github.com/badlogic/pi-mono), [Oh My Pi](https://github.com/can1357/oh-my-pi) và [AgentKit](https://agentkit.best/?ref=OMG49S8R):
 
 ```text
 pi-dev  = Pi upstream + selected extensions
@@ -10,50 +10,22 @@ pi-ak   = Pi upstream + selected extensions + AgentKit
 pi-omp  = Oh My Pi + AgentKit
 ```
 
-Mỗi profile có runtime config, skills, extensions và sessions riêng. CLI wrapper `pi-dev`/`pi-ak` cô lập skill discovery của Pi cho interactive session khi có profile skills hoặc `$PWD/.pi`: tắt auto-discovery của Pi, load profile skills trước, rồi `$PWD/.pi/skills` nếu có. Nếu không có profile skills và cũng không có project `.pi`, wrapper fallback về discovery mặc định của Pi. Các lifecycle command của Pi (`install`, `remove`, `uninstall`, `update`, `list`, `config`, `auth`) luôn pass-through nguyên trạng. Host nhúng không chạy qua wrapper, gồm Orca session, không được cover bởi isolation này.
+Mỗi profile có runtime config, skills, extensions và sessions riêng. Profile isolation không phải process sandbox và không tách repositories, credentials, ports, containers hay tài nguyên khác ở tầng OS.
 
-Profile isolation không phải process sandbox và không tách repositories, credentials, ports, containers hay các tài nguyên khác ở tầng OS.
-
-## Điều Kiện
+## Điều kiện
 
 - Node.js 22 trở lên
 - npm
 - Bash trên macOS và Linux
-- PowerShell hoặc Command Prompt trên Windows native
+- PowerShell trên Windows native
 
-[Mise](https://mise.jdx.dev/) là dependency runtime; manager có thể cài Mise nếu máy chưa có. AgentKit chỉ bắt buộc khi cài `pi-ak` hoặc `pi-omp`.
+[Mise](https://mise.jdx.dev/) là dependency runtime; `bootstrap` có thể cài khi máy chưa có. [AgentKit](https://agentkit.best/?ref=OMG49S8R) (`ak`) bắt buộc cho `pi-ak`, `pi-omp`, và profile tùy biến với `--with-agentkit`.
 
-## Supported OS
+macOS Apple Silicon đã kiểm chứng. macOS Intel và Linux x64/arm64 là target support. Windows 10/11 x64 native là CI-tested, chưa end-to-end với Pi, OMP, AgentKit và provider authentication thật. Windows ARM64 native không hỗ trợ.
 
-| Môi trường | Trạng thái | Ghi chú |
-|---|---|---|
-| macOS Apple Silicon | Đã kiểm chứng | Automated tests, local tarball và registry smoke đã pass. |
-| macOS Intel | Target support | Cùng Unix/Bash contract; chưa có native smoke trên máy Intel. |
-| Linux x64/arm64 | Target support | Code path hỗ trợ Bash/Linux; chưa có Linux CI hoặc clean-machine smoke. |
-| Windows qua WSL2 | Chưa kiểm chứng | Có thể dùng Linux workflow bên trong WSL, nhưng chưa được claim support. |
-| Windows 10/11 x64 native | CI-tested | Node payload, `.cmd` wrappers và package gates đã pass trên `windows-latest`; chưa có provider-backed native smoke. |
-| Windows ARM64 native | Không hỗ trợ | Chưa có đủ CI/runtime evidence cho full profile workflow. |
+## Cài đặt
 
-`Target support` nghĩa là implementation được thiết kế cho platform đó nhưng chưa đạt cùng evidence level với macOS Apple Silicon. Không nên hiểu là đã được test đầy đủ trên mọi distribution hoặc architecture.
-
-### Windows native support contract
-
-Windows implementation dùng adapter riêng:
-
-- Manager launcher/runtime: `%USERPROFILE%\bin\pi-profile-manager.{cmd,mjs}`
-- Receipt, lock và backups: `%LOCALAPPDATA%\pi-profile-manager`
-- Pi profiles: `%USERPROFILE%\.pi\profiles\{pi-dev,pi-ak}`
-- OMP profile: `%USERPROFILE%\.omp\profiles\pi-omp\agent`
-- Mise configs: `%USERPROFILE%\.config\mise\config.<profile>.toml`
-- Mise bootstrap: exact WinGet package `jdx.mise`; không chạy `mise.run`
-- Foreign/drifted manager artifacts fail-closed; symlink/junction trong managed paths bị từ chối
-- Profile config và wrapper chỉ được update khi có managed marker; file user-owned bị từ chối
-
-Pi, OMP và AgentKit đều có Windows implementation upstream, nhưng AgentKit vẫn xếp Pi/OMP adapters ở mức `spike`. Windows hiện đạt mức `CI-tested`; chỉ được claim end-to-end sau native runtime smoke với Pi/OMP/AgentKit thật và provider authentication.
-
-## Cài Manager
-
-### macOS/Linux
+### macOS và Linux
 
 ```bash
 npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
@@ -73,140 +45,28 @@ pi-profile-manager bootstrap
 pi-profile-manager doctor
 ```
 
-Mở terminal mới sau khi thêm `%USERPROFILE%\bin` vào user `PATH`. Package không tự sửa PowerShell profile hoặc machine/user `PATH`.
+Mở terminal mới sau khi thêm `%USERPROFILE%\bin` vào user `PATH`. Package không có `postinstall` và không sửa PowerShell profile.
 
-Package không có `postinstall`. Chỉ explicit command `install` mới ghi manager executable và ownership receipt:
+`@latest` theo npm dist-tag `latest`. Pin version cụ thể khi cần reproduce hoặc rollback (Advanced).
 
-- macOS/Linux executable: `~/.local/bin/pi-profile-manager`
-- macOS/Linux receipt: `~/.local/share/pi-profile-manager/receipt.json`
-- Windows executable: `%USERPROFILE%\bin\pi-profile-manager.{cmd,mjs}`
-- Windows receipt: `%LOCALAPPDATA%\pi-profile-manager\receipt.json`
-
-`@latest` resolve version đang được gắn npm dist-tag `latest`. Khi cần reproduce chính xác hoặc rollback, hãy pin version cụ thể.
-
-## Bootstrap Mise
-
-Nếu `doctor` báo thiếu Mise:
-
-```bash
-pi-profile-manager bootstrap --dry-run
-pi-profile-manager bootstrap
-pi-profile-manager doctor
-```
-
-Trên macOS/Linux, `bootstrap` tải official installer từ `https://mise.run` vào temporary file. Installer chỉ ghi vào staging directory cùng filesystem; manager chạy `--version` trên binary staging rồi mới atomic rename thành `~/.local/bin/mise`. Nếu download, install hoặc verification lỗi, target cuối vẫn absent và staging được dọn.
-
-Command không pipe network response trực tiếp vào shell, không dùng `sudo`, không sửa shell rc và không tự cài Node.js/npm hoặc AgentKit. Trên Windows, `bootstrap` gọi exact package `winget install --id jdx.mise --exact`, rồi verify `mise --version`. Nếu Mise đã có, command là idempotent no-op trên mọi platform.
-
-## Cài Profiles
-
-Preview từng mutation trước khi apply:
+## Profiles
 
 ```bash
 pi-profile-manager install pi-dev --dry-run
 pi-profile-manager install pi-dev
-
-pi-profile-manager install pi-ak --dry-run
-pi-profile-manager install pi-ak
-
-pi-profile-manager install pi-omp --dry-run
-pi-profile-manager install pi-omp
-
-pi-profile-manager verify all
-```
-## Thêm profile mới
-
-Tạo profile Oh My Pi tùy biến với tùy chọn OMP Auth Broker hoặc local credential:
-
-```bash
-# Thiết lập tương tác qua terminal:
-pi-profile-manager add
-# hoặc chỉ định tên trước:
-pi-profile-manager add my-team
-
-# Chế độ OMP Auth Broker:
-pi-profile-manager add my-team \
-  --auth broker \
-  --broker-url https://broker.example.internal \
-  --broker-token "$OMP_AUTH_BROKER_TOKEN"
-
-# Xem trước dry-run:
-pi-profile-manager add my-team \
-  --auth broker \
-  --broker-url https://broker.example.internal \
-  --broker-token "$OMP_AUTH_BROKER_TOKEN" \
-  --dry-run
-
-# Chế độ Local kèm AgentKit:
-pi-profile-manager add my-local \
-  --auth local \
-  --with-agentkit
-
-# Kiểm tra profile:
-pi-profile-manager verify my-team
 ```
 
-Khi chọn chế độ broker, `OMP_AUTH_BROKER_URL` và `OMP_AUTH_BROKER_TOKEN` được lưu vào `~/.omp/profiles/<name>/agent/.env`. Trên macOS và Linux (POSIX), file được giới hạn quyền nghiêm ngặt `0600` (chỉ chủ sở hữu đọc/ghi). Trên Windows, file kế thừa user-scoped ACL từ `%USERPROFILE%`. Manager tuyệt đối không tạo bản backup chứa thông tin bí mật.
+`pi-ak` và `pi-omp` cần `ak` trên `PATH`. Profile tùy biến, verify và inventory JSON nằm trong Advanced.
 
-
-## Xem Profile Đã Cài
-
-Tool khác có thể đọc inventory ở chế độ read-only mà không scan home hoặc đoán đường dẫn profile:
-
-```bash
-pi-profile-manager profiles list --json
-```
-
-Command chỉ trả các profile có evidence tại config hoặc wrapper path cố định do Pi Profile Manager quản lý. Stdout là JSON theo schema version `1`; diagnostics chỉ ghi vào stderr. Exit code vẫn là `0` khi inventory rỗng hoặc có profile unhealthy; command chỉ trả non-zero khi không thể tạo inventory đáng tin cậy hoặc invocation không hợp lệ. `agentkitEnabled` yêu cầu AgentKit lifecycle evidence hợp lệ, `managed` xác minh ownership của manager, còn `healthy` kiểm tra thêm profile root, generated artifacts và runtime environment. Command không tự repair profile và không đọc credentials.
-
-## Update
-
-Update manager theo npm dist-tag `latest`:
-
-```bash
-npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
-```
-
-Update Pi hoặc OMP runtime:
-
-```bash
-pi-profile-manager update pi
-pi-profile-manager update omp
-# hoặc update cả hai
-pi-profile-manager update all
-```
-
-Pin runtime version cụ thể:
-
-```bash
-pi-profile-manager update pi --version 0.84.3
-pi-profile-manager update omp --version 18.0.4
-```
-
-Pin manager version để reproduce hoặc rollback:
-
-```bash
-npx --yes --package @thieung/pi-profile-manager@1.2.4 ppm-bootstrap install
-```
-
-## Status Và Uninstall
-
-```bash
-npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap status
-npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap uninstall
-```
-
-Uninstall chỉ xóa manager artifacts có thể xác minh ownership. Profiles, Mise config, wrappers, credentials và backups được giữ nguyên.
-
-## Safety Contract
+## An toàn
 
 - Không đọc hoặc copy provider credentials.
 - Không tự chạy mutation qua npm lifecycle scripts.
-- Không overwrite executable không có receipt hợp lệ.
-- Không overwrite executable đã drift khỏi checksum trong receipt.
+- Không overwrite executable không có receipt hợp lệ, hoặc đã drift khỏi checksum trong receipt.
 - Upgrade tạo backup và rollback nếu replacement thất bại.
 - `--dry-run` của payload không chạy installer hoặc network mutation.
-- V1 giả định user đang chạy tool là actor duy nhất sửa managed paths trong lúc command thực thi; tool không chống directory-swap đồng thời từ process khác có cùng quyền user.
+- Không chống directory-swap đồng thời từ process khác cùng quyền user.
+- Uninstall chỉ xóa manager artifacts đã xác minh ownership; không xóa profiles, credentials hay backups.
 
 ## Development
 
@@ -216,3 +76,77 @@ npm pack --dry-run
 ```
 
 Source được phát hành theo [MIT License](LICENSE).
+
+<details>
+<summary>Advanced</summary>
+
+### Thêm profiles
+
+```bash
+pi-profile-manager install pi-ak --dry-run
+pi-profile-manager install pi-ak
+pi-profile-manager install pi-omp --dry-run
+pi-profile-manager install pi-omp
+pi-profile-manager verify all
+```
+
+### Thêm profile Oh My Pi tùy biến
+
+Nên dùng interactive setup. Token nhập ở prompt không nằm trên argv:
+
+```bash
+pi-profile-manager add
+pi-profile-manager add my-team
+```
+
+Cờ broker. Dùng URL `https://` đáng tin. `--broker-token` đưa giá trị đã expand vào argv.
+
+```bash
+pi-profile-manager add my-team \
+  --auth broker \
+  --broker-url https://broker.example.internal \
+  --broker-token "$OMP_AUTH_BROKER_TOKEN" \
+  --dry-run
+```
+
+Chế độ local kèm AgentKit:
+
+```bash
+pi-profile-manager add my-local --auth local --with-agentkit
+pi-profile-manager verify my-team
+```
+
+Khi chọn broker, `OMP_AUTH_BROKER_URL` và `OMP_AUTH_BROKER_TOKEN` được lưu vào `~/.omp/profiles/<name>/agent/.env` (POSIX `0600`). Manager không tạo backup chứa secrets.
+
+### Inventory
+
+```bash
+pi-profile-manager profiles list --json
+```
+
+Stdout là schema version 1; diagnostics ghi stderr. Exit 0 gồm inventory rỗng và profile unhealthy. Phải đọc `managed` và `healthy`; đừng coi exit 0 là mọi profile healthy. Command không đọc credentials và không repair profile.
+
+### Update, status, uninstall
+
+```bash
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@1.2.4 ppm-bootstrap install
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap status
+npx --yes --package @thieung/pi-profile-manager@latest ppm-bootstrap uninstall
+```
+
+```bash
+pi-profile-manager update pi
+pi-profile-manager update omp
+pi-profile-manager update all
+pi-profile-manager update pi --version 0.84.3
+pi-profile-manager update omp --version 18.0.4
+```
+
+Uninstall chỉ xóa manager artifacts có thể xác minh ownership.
+
+### Nguồn bootstrap
+
+Trên macOS/Linux, `bootstrap` tải official installer từ `https://mise.run` và chạy; `mise --version` không phải kiểm tra authenticity mật mã. Trên Windows gọi `winget install --id jdx.mise --exact`. Nếu Mise đã có, command là no-op.
+
+</details>
