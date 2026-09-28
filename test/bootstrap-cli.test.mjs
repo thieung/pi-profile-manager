@@ -4,8 +4,9 @@ import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const binPath = new URL("../bin/pi-profile-manager.mjs", import.meta.url).pathname;
+const binPath = fileURLToPath(new URL("../bin/pi-profile-manager.mjs", import.meta.url));
 const posixOnly = { skip: process.platform === "win32" };
 
 async function runBin(args) {
