@@ -99,6 +99,12 @@ pi-profile-manager add
 pi-profile-manager add my-team
 ```
 
+Không cần cài manager trước, mọi lệnh manager đều chạy được qua npx:
+
+```bash
+npx --yes --package @thieung/pi-profile-manager@latest pi-profile-manager add my-local --auth local --with-agentkit
+```
+
 Cờ broker. Dùng URL `https://` đáng tin. `--broker-token` đưa giá trị đã expand vào argv.
 
 ```bash

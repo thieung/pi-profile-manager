@@ -9,6 +9,7 @@ for (const file of [
   "scripts/run-command.mjs",
   "scripts/run-tests.mjs",
   "scripts/test-payload.mjs",
+  "test/bootstrap-cli.test.mjs",
   "test/managed-install.test.mjs",
   "test/managed-install-windows.test.mjs",
   "test/windows-payload.test.mjs",

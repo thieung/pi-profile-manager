@@ -99,6 +99,12 @@ pi-profile-manager add
 pi-profile-manager add my-team
 ```
 
+Without installing the manager first, any manager command runs through npx:
+
+```bash
+npx --yes --package @thieung/pi-profile-manager@latest pi-profile-manager add my-local --auth local --with-agentkit
+```
+
 Broker flags. Use a trusted `https://` URL. `--broker-token` puts the expanded value in the process argument list.
 
 ```bash
