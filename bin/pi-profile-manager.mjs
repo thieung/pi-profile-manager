@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -35,6 +36,9 @@ Usage:
   npx --yes --package ${packageMetadata.name}@${packageMetadata.version} ppm-bootstrap status
   npx --yes --package ${packageMetadata.name}@${packageMetadata.version} ppm-bootstrap uninstall
 
+Run any manager command without installing:
+  npx --yes --package ${packageMetadata.name}@${packageMetadata.version} pi-profile-manager add <name> --auth local --with-agentkit
+
 After install:
   pi-profile-manager doctor
   pi-profile-manager install <pi-dev|pi-ak|pi-omp|all> [--dry-run]
@@ -45,10 +49,27 @@ After install:
 `);
 }
 
+const bootstrapCommands = new Set(["install", "status", "uninstall", "--version", "-v", "help", "--help", "-h"]);
+
+// Bootstrap commands take no arguments, so any other invocation (including
+// `install <profile>`) is a manager command and runs the packaged payload.
+function runPayload(args) {
+  const [file, argv] = windows
+    ? [process.execPath, [context.windowsPayloadPath, ...args]]
+    : ["bash", [context.payloadPath, ...args]];
+  const result = spawnSync(file, argv, { stdio: "inherit" });
+  if (result.error) {
+    throw result.error;
+  }
+  process.exitCode = result.status ?? 1;
+}
+
 async function main() {
-  const [command, ...rest] = process.argv.slice(2);
-  if (rest.length > 0) {
-    throw new Error(`bootstrap command does not accept extra arguments: ${rest.join(" ")}`);
+  const args = process.argv.slice(2);
+  const [command, ...rest] = args;
+  if (command !== undefined && (!bootstrapCommands.has(command) || rest.length > 0)) {
+    runPayload(args);
+    return;
   }
 
   switch (command) {
@@ -76,9 +97,6 @@ async function main() {
     case undefined:
       usage();
       return;
-    default:
-      usage();
-      throw new Error(`unknown bootstrap command: ${command}`);
   }
 }
 
